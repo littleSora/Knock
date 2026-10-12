@@ -1,17 +1,11 @@
 import { api, h, icon, errText, toast } from './common.js';
 import { profileButton } from './account.js';
 
-const S = { friends: [], notif: { inbox: [], spam: [], friendAdds: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null };
+const S = { friends: [], notif: { inbox: [], spam: [], friendAdds: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, inCall: false, sessionId: null };
 let bar, badgeEl, panels;
 
-export function mountTopbar(user) {
-  bar = document.getElementById('topbar');
-  const brand = h('a', { class: 'brand', href: user ? '/dashboard' : '/' }, h('span', { class: 'brand-mark' }, 'K'), 'Knock');
-  if (!user) {
-    bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('a', { class: 'btn ghost sm', href: '/login' }, 'Log in'), h('a', { class: 'btn sm', href: '/login' }, 'Sign up')));
-    return;
-  }
-
+// Search + friends + notifications, shared by the normal top bar and the in-call bar.
+function buildTools() {
   // Search -> opens a profile (that's where the add-friend icon lives)
   const results = h('ul', { class: 'search-results rows', hidden: true });
   const input = h('input', { type: 'search', placeholder: 'Find people', 'aria-label': 'Find people', autocomplete: 'off' });
@@ -23,7 +17,7 @@ export function mountTopbar(user) {
       if (q.length < 2) { results.hidden = true; return; }
       const { users } = await api('/api/users/search?q=' + encodeURIComponent(q)).catch(() => ({ users: [] }));
       results.replaceChildren(...(users.length
-        ? users.map((u) => h('li', { class: 'row' }, h('a', { class: 'row-main', href: '/u/' + u.handle }, h('span', { class: 'name' }, u.display_name), h('span', { class: 'sub' }, '@' + u.handle))))
+        ? users.map((u) => h('li', { class: 'row' }, h('a', { class: 'row-main', href: '/u/' + u.handle, ...newTab() }, h('span', { class: 'name' }, u.display_name), h('span', { class: 'sub' }, '@' + u.handle))))
         : [h('li', { class: 'empty' }, 'No one found. Try their @handle.')]));
       results.hidden = false;
     }, 250);
@@ -33,14 +27,45 @@ export function mountTopbar(user) {
   panels = { friends: h('div', { class: 'panel', hidden: true }), notif: h('div', { class: 'panel', hidden: true }) };
   const friendsBtn = h('button', { class: 'icon-btn', 'aria-label': 'Friends', onclick: () => togglePanel('friends') }, icon('users'));
   const bellBtn = h('button', { class: 'icon-btn', 'aria-label': 'Notifications', onclick: () => togglePanel('notif') }, icon('bell'), badgeEl);
-  const logout = h('button', { class: 'btn ghost sm', onclick: async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; } }, 'Log out');
-
-  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('div', { class: 'search' }, input, results), friendsBtn, bellBtn, logout, profileButton(user), panels.friends, panels.notif));
+  return { search: h('div', { class: 'search' }, input, results), friendsBtn, bellBtn };
+}
+function wirePanels() {
   // Switching Inbox/Spam re-renders the panel, which detaches the clicked tab before this handler runs.
   // composedPath() is captured when the click starts, so a click inside the bar still counts as inside.
   document.addEventListener('click', (e) => { if (!e.composedPath().includes(bar)) closePanels(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
   connect();
+}
+// In a call, anything that would navigate (profiles, call invites) opens in a new tab so you never drop out of the call.
+const newTab = () => (S.inCall ? { target: '_blank', rel: 'noopener' } : {});
+
+export function mountTopbar(user) {
+  bar = document.getElementById('topbar');
+  const brand = h('a', { class: 'brand', href: user ? '/dashboard' : '/' }, h('span', { class: 'brand-mark' }, 'K'), 'Knock');
+  if (!user) {
+    bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('a', { class: 'btn ghost sm', href: '/login' }, 'Log in'), h('a', { class: 'btn sm', href: '/login' }, 'Sign up')));
+    return;
+  }
+  const { search, friendsBtn, bellBtn } = buildTools();
+  const logout = h('button', { class: 'btn ghost sm', onclick: async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; } }, 'Log out');
+  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, search, friendsBtn, bellBtn, logout, profileButton(user), panels.friends, panels.notif));
+  wirePanels();
+}
+
+/**
+ * The top-right tools inside a call: find people, friends, notifications and direct messages, with the
+ * "Copy invite link" button right next to them. `nav` already holds that button; `sessionId` is this call, so
+ * "Invite to call" in a chat sends this call's link instead of starting a different one.
+ */
+export function mountRoomTools(nav, user, sessionId) {
+  bar = nav;
+  S.inCall = true;
+  S.sessionId = sessionId;
+  document.body.classList.add('in-call');
+  const { search, friendsBtn, bellBtn } = buildTools();
+  const copy = nav.querySelector('#copy');
+  nav.replaceChildren(search, friendsBtn, bellBtn, copy, profileButton(user), panels.friends, panels.notif);
+  wirePanels();
 }
 
 function closePanels() { Object.values(panels).forEach((p) => (p.hidden = true)); bar.querySelector('.search-results').hidden = true; }
@@ -94,7 +119,7 @@ function renderNotif() {
   let body;
   if (S.tab === 'inbox') {
     const adds = n.friendAdds.map((a) => h('li', { class: 'row' },
-      h('a', { class: 'row-main', href: '/u/' + a.handle }, h('span', { class: 'name' }, `${a.display_name} added you as a friend`), h('span', { class: 'sub' }, 'View profile')),
+      h('a', { class: 'row-main', href: '/u/' + a.handle, ...newTab() }, h('span', { class: 'name' }, `${a.display_name} added you as a friend`), h('span', { class: 'sub' }, 'View profile')),
       a.read_at ? null : h('span', { class: 'dot new', role: 'img', 'aria-label': 'New' })));
     const rows = [...adds, ...n.inbox.map(threadRow)];
     body = rows.length ? h('ul', { class: 'rows' }, rows) : h('p', { class: 'empty' }, 'Nothing new. Messages from your friends show up here.');
@@ -106,8 +131,13 @@ function renderNotif() {
 
 /* ---------- direct-message dock ---------- */
 function msgEl(m, other) {
-  const link = m.body.startsWith(location.origin + '/s/') && !/\s/.test(m.body); // same-origin call invite
-  return h('div', { class: 'msg' + (m.from_id === other.id ? '' : ' mine') }, link ? h('a', { href: m.body, rel: 'noopener' }, 'Join my call') : m.body);
+  const isLink = m.body.startsWith(location.origin + '/s/') && !/\s/.test(m.body); // same-origin call invite
+  const here = S.inCall && isLink && m.body === `${location.origin}/s/${S.sessionId}`; // an invite to the call you're already in
+  const mine = m.from_id !== other.id;
+  let content = m.body;
+  if (here) content = mine ? 'You invited them to this call' : 'Invited you to this call (you’re already in it)';
+  else if (isLink) content = h('a', { href: m.body, rel: 'noopener', ...(S.inCall ? { target: '_blank' } : {}) }, mine ? 'Your call invite' : 'Join my call');
+  return h('div', { class: 'msg' + (mine ? ' mine' : '') }, content);
 }
 function appendMsg(m) {
   if (!S.chat || S.chat.messages.some((x) => x.id === m.id)) return;
@@ -142,6 +172,11 @@ async function openChat(u) {
 }
 async function inviteToCall(u) {
   try {
+    if (S.inCall) { // already in a call: send this call's link and stay here
+      await api('/api/messages', { method: 'POST', body: { toId: u.id, body: `${location.origin}/s/${S.sessionId}` } });
+      toast(`Invite sent to ${u.display_name}`);
+      return;
+    }
     const { id } = await api('/api/sessions', { method: 'POST' });
     await api('/api/messages', { method: 'POST', body: { toId: u.id, body: `${location.origin}/s/${id}` } });
     location.href = '/s/' + id;

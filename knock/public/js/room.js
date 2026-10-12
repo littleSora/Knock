@@ -1,5 +1,6 @@
 import { api, h, icon, renderCode, toast, errText, avatarEl, confirmDialog, flash } from './common.js';
 import { profileButton } from './account.js';
+import { mountRoomTools } from './topbar.js';
 
 const $ = (id) => document.getElementById(id);
 const sessionId = location.pathname.split('/').pop().toLowerCase();
@@ -111,7 +112,24 @@ function onSignal({ from, nickname, handle, avatarAt, data }) {
 }
 
 /* ---------- join ---------- */
+// A person can be in a call only once. This browser-side lock stops a second tab (guests included); the server also
+// refuses a second connection from the same account (other browsers and devices).
+let releaseTabLock = () => {};
+function claimTab() {
+  if (!navigator.locks) return Promise.resolve(true);
+  return new Promise((resolve) => navigator.locks.request('knock-call-' + sessionId, { ifAvailable: true }, (lock) => {
+    if (!lock) { resolve(false); return undefined; }
+    resolve(true);
+    return new Promise((release) => { releaseTabLock = release; }); // held until we leave (or the tab closes)
+  }));
+}
 async function join(nickname) {
+  if (!(await claimTab())) throw Object.assign(new Error('already_in_call'), { code: 'already_in_call' });
+  try {
+    await joinInner(nickname);
+  } catch (err) { releaseTabLock(); throw err; }
+}
+async function joinInner(nickname) {
   if (!user) localStorage.setItem('knock.nick', nickname);
   local = await getMedia();
   if (!local) toast('Camera and mic aren’t available. You can still chat and watch.');
@@ -165,7 +183,8 @@ function wireTopbar() {
   $('codeToggle').addEventListener('click', () => { codeShown = !codeShown; paintCode(); });
   paintCode();
 
-  if (user) { $('profileSlot').replaceChildren(profileButton(user)); return; }
+  $('copy').replaceChildren(icon('copy', 16), h('span', { class: 'lbl' }, 'Copy invite link'));
+  if (user) { mountRoomTools($('roomRight'), user, sessionId); return; }
   // Guests: offer to log in / sign up. Signing in sends them to /login and straight back to this call as a member.
   $('guestBar').hidden = false;
   $('guestClose').replaceChildren(icon('x', 16));
@@ -184,6 +203,7 @@ function wireTopbar() {
 /* ---------- leaving: the host ends the session for everyone, everyone else just leaves ---------- */
 function teardown() {
   leaving = true;
+  releaseTabLock();
   local?.getTracks().forEach((t) => t.stop());
   [...peers.keys()].forEach(dropPeer);
 }

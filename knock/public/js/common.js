@@ -74,6 +74,8 @@ const MESSAGES = {
   delivery_failed: 'We couldn’t send the code. Try again in a minute.',
   session_not_found: 'No session matches that code. Check it with the person who shared it.',
   google_failed: 'Google sign-in didn’t work. Try again.',
+  already_in_call: 'You’re already in this call in another tab or on another device. Close that one first, or just use it.',
+  room_full: 'This call is full.',
   session_ended: 'That session has ended.',
   already_in_use: 'That is already used by another account.',
   same_as_current: 'That is already on your account.',

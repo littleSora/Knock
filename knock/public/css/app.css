@@ -198,13 +198,21 @@ input[type='range'] { padding: 0; border: 0; accent-color: var(--pink); backgrou
 .guest-bar { color: var(--on-yellow); display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.75rem; padding: 0.5rem 1rem; background: var(--yellow); border-bottom: 2px solid var(--ink); font-size: 0.92rem; }
 .guest-bar .grow { min-width: 12rem; }
 .guest-bar .btn { margin: 0; box-shadow: none; }
-#profileSlot { display: contents; }
-.room .topbar #profileSlot .me-btn { margin-left: 0; }
+/* in a call: tools on the right, with the copy-invite button right beside them */
+.room .topbar .bar-right { flex: none; min-width: 0; }
+.room .topbar .bar-right .btn { margin-left: 0; display: inline-flex; align-items: center; gap: 0.4rem; }
+.room .topbar { position: relative; }
+body.in-call .chat-dock { right: auto; left: 1rem; bottom: 5.5rem; }
 
 @media (max-width: 600px) {
   .topbar { flex-wrap: wrap; }
   .bar-right { gap: 0.35rem; }
   .search input { width: 5rem; }
+}
+@media (max-width: 760px) {
+  .room .search { display: none; }
+  .room .copy .lbl, .room #copy .lbl { display: none; }
+  .room #copy { padding: 0.3rem 0.5rem; }
 }
 @media (max-width: 520px) {
   .room .topbar { gap: 0.5rem; padding: 0.6rem 0.75rem; }

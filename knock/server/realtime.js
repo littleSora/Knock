@@ -64,6 +64,9 @@ function joinRoom(socket, p = {}, ack) {
   if (!nickname) return reply({ error: 'nickname_required' }); // guests must set a nickname before entering
   if (socket.data.room) leaveRoom(socket);
   const room = rooms.get(id) ?? new Map();
+  // One seat per account: you can't join a call you're already in (another tab, browser or device), so nobody
+  // ends up in a call with themselves, e.g. by opening their own invite link.
+  if (user && [...room].some(([sid, m]) => m.userId === user.id && sid !== socket.id)) return reply({ error: 'already_in_call' });
   if (room.size >= MAX_PEOPLE) return reply({ error: 'room_full' });
   const peers = [...room].map(([sid, m]) => ({ id: sid, nickname: m.nickname, handle: m.handle, avatarAt: m.avatarAt }));
   const handle = user?.handle ?? null; // lets other people open this person's profile card (guests have none)
