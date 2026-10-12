@@ -5,6 +5,11 @@
   <p class="lede">Check it with the person who shared it, or start a new call.</p>
   <a class="btn primary" href="/">Back to start</a>
 </div>
+<div id="ended" class="lobby" hidden>
+  <h1 style="font-size:2.2rem">This session has ended</h1>
+  <p id="endedMsg" class="lede">The host closed it, so the code no longer works. Start a new call any time.</p>
+  <a id="endedHome" class="btn primary" href="/">Back to start</a>
+</div>
 <div id="lobby" class="lobby" hidden>
   <a class="brand" href="/"><span class="brand-mark">K</span>Knock</a>
   <h1 id="lobbyTitle" style="font-size:2.4rem;margin-top:1.5rem">Pick a nickname to join</h1>
@@ -18,15 +23,24 @@
     <input id="nick" maxlength="24" autocomplete="nickname" required>
     <p class="hint">Others in the call will see this name. Camera and mic are requested when you join.</p>
     <button class="btn primary">Join call</button>
+    <p class="hint" style="margin-top:1rem">Have an account? <a id="lobbyLogin" href="/login">Log in or create one</a> to share more than a nickname.</p>
   </form>
   <p id="lobbyMsg" class="error" role="alert"></p>
 </div>
 <div id="live" class="room" hidden>
   <header class="topbar">
-    <a class="brand" href="/"><span class="brand-mark">K</span></a>
+    <a id="brandLive" class="brand" href="/" aria-label="Knock home"><span class="brand-mark">K</span></a>
     <div id="miniCode" class="mini-code"></div>
+    <button id="codeToggle" class="icon-btn sm" type="button" aria-pressed="false" aria-label="Show session code"></button>
     <button id="copy" class="btn sm">Copy invite link</button>
+    <span id="profileSlot"></span>
   </header>
+  <div id="guestBar" class="guest-bar" hidden>
+    <span class="grow">You’re in as a guest, so others only see your nickname. Log in or create an account to share more about you, like your name and picture.</span>
+    <a id="guestLogin" class="btn sm" href="/login">Log in</a>
+    <a id="guestSignup" class="btn primary sm" href="/login">Create account</a>
+    <button id="guestClose" class="icon-btn sm" type="button" aria-label="Dismiss"></button>
+  </div>
   <div class="room-main">
     <div id="grid" class="grid"></div>
     <aside id="side" class="side" hidden>

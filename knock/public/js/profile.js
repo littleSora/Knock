@@ -1,4 +1,4 @@
-import { api, h, icon, errText, toast } from './common.js';
+import { api, h, icon, errText, toast, avatarEl } from './common.js';
 import { mountTopbar } from './topbar.js';
 
 const { user } = await api('/api/auth/me');
@@ -29,7 +29,7 @@ if (!user) {
     } }, box, h('p', { class: 'hint' }, 'If they haven’t added you as a friend, your message lands in their Spam tab.'), h('button', { class: 'btn primary' }, 'Send message'));
 
     view.replaceChildren(
-      h('div', { class: 'profile-head' }, h('span', { class: 'tile avatar', 'aria-hidden': 'true' }, [...p.display_name][0] || '?'),
+      h('div', { class: 'profile-head' }, avatarEl(p, 80),
         h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle)), h('span', { class: 'grow' }), isSelf ? null : friendBtn),
       isSelf ? h('p', { class: 'lede' }, 'This is how other people see you.') : form);
     document.title = `${p.display_name} · Knock`;

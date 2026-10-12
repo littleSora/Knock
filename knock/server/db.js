@@ -89,7 +89,19 @@ CREATE TABLE IF NOT EXISTS recap_items (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recap_by_session ON recap_items(session_id);
+-- Profile pictures: the browser crops to a small square before upload, so each row is tiny.
+CREATE TABLE IF NOT EXISTS avatars (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
+
+// A host can end a session for everyone; ended sessions can't be rejoined.
+if (!db.prepare('PRAGMA table_info(call_sessions)').all().some((c) => c.name === 'ended_at')) {
+  db.exec('ALTER TABLE call_sessions ADD COLUMN ended_at INTEGER');
+}
 
 // The name an account was created with (display_name can be changed later). Older accounts get their current name.
 if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'signup_name')) {
@@ -105,6 +117,8 @@ export function createSession(ownerId = null) {
   }
 }
 export const sessionExists = (id) => !!db.prepare('SELECT 1 FROM call_sessions WHERE id = ?').get(id);
+export const sessionInfo = (id) => db.prepare('SELECT owner_id, ended_at FROM call_sessions WHERE id = ?').get(id) ?? null;
+export const endSession = (id) => db.prepare('UPDATE call_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(Date.now(), id);
 
 export function purgeExpired() {
   const now = Date.now();

@@ -1,7 +1,7 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import crypto from 'node:crypto';
-import { db, createSession, sessionExists } from './db.js';
+import { db, createSession, sessionExists, sessionInfo } from './db.js';
 import { requireUser as needUser } from './auth.js';
 import { normalizeSessionId, isSessionId, cleanName, cleanBody } from './util.js';
 import { isOnline, emitTo, roomCount } from './realtime.js';
@@ -28,15 +28,70 @@ api.get('/ice', (_req, res) => {
 });
 
 /* ---------- call sessions (guests allowed) ---------- */
-api.post('/sessions', sessionLimiter, (req, res) => res.json({ id: createSession(req.user?.id ?? null) }));
+// Whoever creates a session is its host. Signed-in creators are recorded as the owner; everyone (guests included)
+// also gets a signed, httpOnly cookie for that one session, so a guest host stays the host if they log in mid-call.
+api.post('/sessions', sessionLimiter, (req, res) => {
+  const id = createSession(req.user?.id ?? null);
+  res.cookie('h_' + id, '1', { signed: true, httpOnly: true, sameSite: 'lax', secure: isProd, maxAge: 48 * 3600 * 1000, path: '/' });
+  res.json({ id });
+});
 
 api.get('/sessions/:id', (req, res) => {
   const id = normalizeSessionId(req.params.id);
-  if (!isSessionId(id) || !sessionExists(id)) return res.status(404).json({ error: 'session_not_found' });
-  res.json({ id, participants: roomCount(id) });
+  const info = isSessionId(id) ? sessionInfo(id) : null;
+  if (!info) return res.status(404).json({ error: 'session_not_found' });
+  res.json({ id, participants: roomCount(id), ended: !!info.ended_at });
+});
+
+/* ---------- profile pictures (public once the human check passes, like a display name) ---------- */
+api.get('/avatars/:handle', (req, res) => {
+  const row = db
+    .prepare('SELECT a.mime, a.data FROM avatars a JOIN users u ON u.id = a.user_id WHERE u.handle = ?')
+    .get(String(req.params.handle).toLowerCase());
+  if (!row) return res.status(404).end();
+  res.set({ 'Content-Type': row.mime, 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+  res.send(Buffer.from(row.data));
 });
 
 /* ---------- everything below needs a login ---------- */
+// Full account details are only ever returned to the account's owner (never put these on req.user, which is shared with other people).
+api.get('/me', needUser, (req, res) => {
+  const u = db
+    .prepare(
+      `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email, phone,
+         google_sub IS NOT NULL AS has_google, created_at,
+         (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at
+       FROM users WHERE id = ?`,
+    )
+    .get(req.user.id);
+  res.json({ user: { ...u, has_google: !!u.has_google } });
+});
+
+// The browser crops the picture to a 256px square first (after checking the 3 MB limit on the original file),
+// so what arrives here is small. We accept only real PNG/JPEG/WebP bytes (never SVG) and cap the size.
+const MAX_AVATAR = 512 * 1024;
+const rawImage = express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: MAX_AVATAR });
+function sniffImage(b) {
+  if (b.length > 12 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length > 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+api.put('/me/avatar', needUser, limiter(10), (req, res, next) => rawImage(req, res, (err) => (err ? res.status(413).json({ error: 'image_too_large' }) : next())), (req, res) => {
+  const mime = Buffer.isBuffer(req.body) ? sniffImage(req.body) : null;
+  if (!mime) return res.status(400).json({ error: 'invalid_image' });
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO avatars(user_id, mime, data, updated_at) VALUES (?,?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`,
+  ).run(req.user.id, mime, req.body, now);
+  res.json({ ok: true, avatar_at: now });
+});
+api.delete('/me/avatar', needUser, (req, res) => {
+  db.prepare('DELETE FROM avatars WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true, avatar_at: null });
+});
+
 api.patch('/me', needUser, (req, res) => {
   const name = cleanName(req.body?.display_name, 40);
   if (!name) return res.status(400).json({ error: 'invalid_name' });
@@ -117,7 +172,7 @@ api.get('/users/search', needUser, socialLimiter, (req, res) => {
 
 api.get('/users/:handle', needUser, (req, res) => {
   const user = db
-    .prepare('SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, created_at FROM users WHERE handle = ?')
+    .prepare('SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, created_at, (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at FROM users WHERE handle = ?')
     .get(String(req.params.handle).toLowerCase());
   if (!user) return res.status(404).json({ error: 'user_not_found' });
   const isFriend = !!db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(req.user.id, user.id);

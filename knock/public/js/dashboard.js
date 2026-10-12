@@ -12,9 +12,13 @@ midnight.setHours(0, 0, 0, 0);
 const dayStart = midnight.getTime();
 
 const hour = new Date().getHours();
-$('hello').textContent = `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}, ${user.display_name}`;
+const paintName = () => {
+  $('hello').textContent = `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}, ${user.display_name}`;
+  $('displayName').value = user.display_name;
+};
+paintName();
 $('handle').textContent = '@' + user.handle;
-$('displayName').value = user.display_name;
+window.addEventListener('profile-updated', paintName); // the profile picture menu (top right) can change the name too
 
 async function load() {
   const d = await api('/api/dashboard?dayStart=' + dayStart);
@@ -43,7 +47,7 @@ $('sched').addEventListener('submit', async (e) => {
 });
 $('nameForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: $('displayName').value } }); toast('Name saved'); $('hello').textContent = `Hello, ${r.display_name}`; }
+  try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: $('displayName').value } }); user.display_name = r.display_name; window.dispatchEvent(new Event('profile-updated')); toast('Name saved'); }
   catch (err) { toast(errText(err)); }
 });
 $('instant').addEventListener('click', async () => { location.href = '/s/' + (await api('/api/sessions', { method: 'POST' })).id; });

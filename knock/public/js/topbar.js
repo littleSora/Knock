@@ -1,4 +1,5 @@
 import { api, h, icon, errText, toast } from './common.js';
+import { profileButton } from './account.js';
 
 const S = { friends: [], notif: { inbox: [], spam: [], friendAdds: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null };
 let bar, badgeEl, panels;
@@ -34,7 +35,7 @@ export function mountTopbar(user) {
   const bellBtn = h('button', { class: 'icon-btn', 'aria-label': 'Notifications', onclick: () => togglePanel('notif') }, icon('bell'), badgeEl);
   const logout = h('button', { class: 'btn ghost sm', onclick: async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; } }, 'Log out');
 
-  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('div', { class: 'search' }, input, results), friendsBtn, bellBtn, logout, panels.friends, panels.notif));
+  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('div', { class: 'search' }, input, results), friendsBtn, bellBtn, logout, profileButton(user), panels.friends, panels.notif));
   // Switching Inbox/Spam re-renders the panel, which detaches the clicked tab before this handler runs.
   // composedPath() is captured when the click starts, so a click inside the bar still counts as inside.
   document.addEventListener('click', (e) => { if (!e.composedPath().includes(bar)) closePanels(); });

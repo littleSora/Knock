@@ -21,7 +21,9 @@ export function userFromToken(token) {
   return (
     db
       .prepare(
-        `SELECT u.id, u.handle, u.display_name FROM auth_sessions s
+        `SELECT u.id, u.handle, u.display_name,
+           (SELECT updated_at FROM avatars a WHERE a.user_id = u.id) AS avatar_at
+         FROM auth_sessions s
          JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?`,
       )
       .get(sha256(token), Date.now()) || null

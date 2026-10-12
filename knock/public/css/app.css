@@ -157,8 +157,8 @@ summary { cursor: pointer; font-weight: 600; }
 .recap-kind label { display: flex; align-items: center; gap: 0.35rem; margin: 0; font-weight: 500; }
 .recap-kind input { width: auto; }
 select { font: inherit; color: var(--ink); background: #fff; padding: 0.5rem 0.6rem; border: 2px solid var(--ink); border-radius: 12px; width: 100%; }
-.tile-avatar { position: absolute; top: 0.6rem; left: 0.6rem; z-index: 2; width: 2.4rem; height: 2.4rem; display: grid; place-items: center; background: var(--yellow); color: var(--ink); border: 2px solid var(--ink); border-radius: 50%; font: 800 1.1rem var(--display); cursor: pointer; box-shadow: 0 2px 0 var(--ink); }
-.tile-avatar:hover { background: #fff; }
+.tile-avatar { position: absolute; top: 0.6rem; left: 0.6rem; z-index: 2; padding: 0; display: grid; background: none; border: 0; border-radius: 50%; cursor: pointer; box-shadow: 0 2px 0 var(--ink); }
+.tile-avatar:hover .pic { background: #fff; }
 .overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 1rem; background: rgba(27, 24, 64, 0.55); }
 .profile-pop { width: min(22rem, 100%); background: #fff; border: 2px solid var(--ink); border-radius: 18px; box-shadow: 6px 6px 0 var(--ink); padding: 0.8rem 1.1rem 1.25rem; }
 .pop-head { display: flex; }
@@ -176,8 +176,34 @@ select { font: inherit; color: var(--ink); background: #fff; padding: 0.5rem 0.6
 .mini-code .grp { display: flex; gap: 0.15rem; min-width: 0; flex: 0 1 auto; }
 .mini-code .tile { flex: 0 1 1.5rem; min-width: 0; max-width: 1.5rem; width: 1.5rem; height: 1.9rem; font-size: 1rem; border-radius: 6px; box-shadow: 0 2px 0 var(--ink); border-width: 1.5px; }
 .lobby { max-width: 28rem; margin: 4rem auto; padding: 0 1.25rem; }
-.toast { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 50; background: var(--ink); color: #fff; padding: 0.6rem 1.1rem; border-radius: 12px; }
+.toast { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 80; background: var(--ink); color: #fff; padding: 0.6rem 1.1rem; border-radius: 12px; }
 
+/* ----- profile pictures, account dialog, cropper, confirm dialogs, guest bar ----- */
+.pic { position: relative; display: inline-grid; place-items: center; flex: none; width: var(--s, 2.5rem); height: var(--s, 2.5rem); border-radius: 50%; overflow: hidden; background: var(--yellow); color: var(--ink); border: 2px solid var(--ink); font: 800 calc(var(--s, 2.5rem) * 0.45) var(--display); line-height: 1; }
+.pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.me-btn { padding: 0; border: 0; background: none; border-radius: 50%; cursor: pointer; display: grid; box-shadow: 0 2px 0 var(--ink); flex: none; }
+.me-btn:hover .pic { background: #fff; }
+.profile-pop.wide { width: min(26rem, 100%); max-height: calc(100vh - 2rem); overflow: auto; }
+.pic-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; flex-wrap: wrap; }
+.pic-actions .btn { margin: 0; display: inline-flex; align-items: center; gap: 0.4rem; }
+.btn-ic { display: inline-grid; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1.1rem; flex-wrap: wrap; }
+.dialog-actions .btn { margin: 0; }
+.crop-wrap { display: grid; place-items: center; margin-top: 0.6rem; }
+.crop-canvas { width: 100%; max-width: 260px; aspect-ratio: 1; border: 2px solid var(--ink); border-radius: 14px; touch-action: none; cursor: grab; background: #fff; }
+.crop-canvas:active { cursor: grabbing; }
+input[type='range'] { padding: 0; border: 0; accent-color: var(--pink); background: none; }
+.guest-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.75rem; padding: 0.5rem 1rem; background: var(--yellow); border-bottom: 2px solid var(--ink); font-size: 0.92rem; }
+.guest-bar .grow { min-width: 12rem; }
+.guest-bar .btn { margin: 0; box-shadow: none; }
+#profileSlot { display: contents; }
+.room .topbar #profileSlot .me-btn { margin-left: 0; }
+
+@media (max-width: 600px) {
+  .topbar { flex-wrap: wrap; }
+  .bar-right { gap: 0.35rem; }
+  .search input { width: 5rem; }
+}
 @media (max-width: 520px) {
   .room .topbar { gap: 0.5rem; padding: 0.6rem 0.75rem; }
   .mini-code .tile { height: 1.5rem; font-size: 0.75rem; border-radius: 5px; }

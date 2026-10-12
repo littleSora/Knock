@@ -28,6 +28,9 @@ const ICONS = {
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   recap: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/>',
 };
 export function icon(name, size = 20) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -67,16 +70,92 @@ const MESSAGES = {
   delivery_failed: 'We couldn’t send the code. Try again in a minute.',
   session_not_found: 'No session matches that code. Check it with the person who shared it.',
   google_failed: 'Google sign-in didn’t work. Try again.',
+  session_ended: 'That session has ended.',
+  image_too_large: 'That picture is too big. Try a smaller crop.',
+  invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG or WebP.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
 
 export const safeNext = (n) => (n && n.startsWith('/') && !n.startsWith('//') && !n.includes('\\') ? n : null);
 export const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-// Renders a session code as two groups of five tiles. animate=true plays the flip-in.
-export function renderCode(el, id, { animate = false } = {}) {
+// Renders a session code as two groups of five tiles. animate=true plays the flip-in; masked=true hides the characters.
+export function renderCode(el, id, { animate = false, masked = false } = {}) {
   const chars = id ? [...id] : Array(10).fill('·');
-  const tile = (c, i) => h('span', { class: 'tile' + (id ? '' : ' blank') + (animate ? ' flip' : ''), style: `--i:${i}` }, c);
+  const hide = !!id && masked;
+  const tile = (c, i) => h('span', { class: 'tile' + (!id || hide ? ' blank' : '') + (animate ? ' flip' : ''), style: `--i:${i}` }, hide ? '•' : c);
   el.replaceChildren(h('span', { class: 'grp' }, chars.slice(0, 5).map(tile)), h('span', { class: 'grp' }, chars.slice(5).map((c, i) => tile(c, i + 5))));
-  el.setAttribute('aria-label', id ? `Session code ${[...id].join(' ')}` : 'No code yet');
+  el.setAttribute('aria-label', hide ? 'Session code hidden' : id ? `Session code ${[...id].join(' ')}` : 'No code yet');
 }
+
+/* ---------- profile pictures: the picture if there is one, otherwise the first letter of the name ---------- */
+export const avatarUrl = (handle, at) => `/api/avatars/${encodeURIComponent(handle)}?v=${at}`;
+export function avatarEl({ handle, display_name: name, avatar_at: at } = {}, size = 40) {
+  const el = h('span', { class: 'pic', style: `--s:${size}px`, 'aria-hidden': 'true' }, [...(name || '?')][0]?.toUpperCase() || '?');
+  if (handle && at) {
+    const img = h('img', { src: avatarUrl(handle, at), alt: '', draggable: 'false' });
+    img.addEventListener('load', () => el.replaceChildren(img)); // keep the letter until the picture has loaded
+  }
+  return el;
+}
+
+/* ---------- modal dialogs (one shared Escape / Tab-trap handler; the top-most dialog wins) ---------- */
+const modals = [];
+const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+document.addEventListener('keydown', (e) => {
+  const top = modals.at(-1);
+  if (!top) return;
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); top.close(); return; }
+  if (e.key !== 'Tab') return;
+  const items = [...top.card.querySelectorAll(FOCUSABLE)].filter((x) => x.offsetParent !== null);
+  if (!items.length) { e.preventDefault(); return; }
+  const first = items[0];
+  const last = items.at(-1);
+  if (!top.card.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}, true);
+
+export function openModal({ label, role = 'dialog', wide = false, describedBy, onClose } = {}, ...kids) {
+  const opener = document.activeElement;
+  const card = h('div', { class: 'profile-pop' + (wide ? ' wide' : ''), role, 'aria-modal': 'true', 'aria-label': label, 'aria-describedby': describedBy, tabindex: '-1' }, ...kids);
+  const overlay = h('div', { class: 'overlay', onmousedown: (e) => { if (e.target === overlay) m.close(); } }, card);
+  const m = {
+    card,
+    closed: false,
+    close(result) {
+      if (m.closed) return;
+      m.closed = true;
+      modals.splice(modals.indexOf(m), 1);
+      overlay.remove();
+      opener?.focus?.();
+      onClose?.(result);
+    },
+  };
+  modals.push(m);
+  document.body.append(overlay);
+  (card.querySelector('[data-autofocus]') || card).focus();
+  return m;
+}
+
+// Resolves true if the person confirms, false if they cancel (button, Escape or clicking outside).
+let dialogCount = 0;
+export function confirmDialog({ title, body, confirmText = 'Confirm', cancelText = 'Cancel' }) {
+  return new Promise((resolve) => {
+    let result = false;
+    const descId = 'dlg-desc-' + ++dialogCount;
+    const no = h('button', { class: 'btn', type: 'button', 'data-autofocus': '', onclick: () => m.close() }, cancelText);
+    const yes = h('button', { class: 'btn primary', type: 'button', onclick: () => { result = true; m.close(); } }, confirmText);
+    const m = openModal({ label: title, role: 'alertdialog', describedBy: descId, onClose: () => resolve(result) },
+      h('h2', { style: 'font-size:1.5rem;margin-top:.4rem' }, title),
+      h('p', { id: descId, class: 'hint', style: 'margin:.6rem 0 0' }, body),
+      h('div', { class: 'dialog-actions' }, no, yes));
+  });
+}
+
+// Show a message on the next page load (used when an action ends by navigating away).
+export const flash = (text) => { try { sessionStorage.setItem('knock.flash', text); } catch { /* storage blocked: skip */ } };
+try {
+  const f = sessionStorage.getItem('knock.flash');
+  if (f) { sessionStorage.removeItem('knock.flash'); queueMicrotask(() => toast(f)); }
+} catch { /* storage blocked: skip */ }

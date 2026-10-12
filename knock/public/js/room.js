@@ -1,15 +1,23 @@
-import { api, h, icon, renderCode, toast, errText } from './common.js';
+import { api, h, icon, renderCode, toast, errText, avatarEl, confirmDialog, flash } from './common.js';
+import { profileButton } from './account.js';
 
 const $ = (id) => document.getElementById(id);
 const sessionId = location.pathname.split('/').pop().toLowerCase();
 const { user } = await api('/api/auth/me');
-const show = (name) => ['missing', 'lobby', 'live'].forEach((k) => ($(k).hidden = k !== name));
+const show = (name) => ['missing', 'ended', 'lobby', 'live'].forEach((k) => ($(k).hidden = k !== name));
+const home = user ? '/dashboard' : '/';
+$('endedHome').href = home;
+$('brandLive').href = home;
 
-try { await api('/api/sessions/' + sessionId); } catch { show('missing'); throw new Error('session_not_found'); }
+let info;
+try { info = await api('/api/sessions/' + sessionId); } catch { show('missing'); throw new Error('session_not_found'); }
+if (info.ended) { show('ended'); throw new Error('session_ended'); }
+const loginUrl = '/login?next=' + encodeURIComponent(location.pathname);
+const joinFailed = (err) => { if (err.code === 'session_ended') return show('ended'); show('lobby'); $('lobbyMsg').textContent = errText(err); };
 
 /* ---------- lobby: guests pick a nickname; signed-in people join under their display name ---------- */
 renderCode($('lobbyCode'), sessionId);
-renderCode($('miniCode'), sessionId);
+renderCode($('miniCode'), sessionId, { masked: true }); // the code in the call's top bar starts hidden
 show('lobby');
 if (user) {
   $('nickForm').hidden = true;
@@ -20,21 +28,24 @@ if (user) {
   const joinAsMember = () => {
     joinBtn.disabled = true;
     joinBtn.textContent = 'Joining…';
-    join(user.display_name).catch((err) => { show('lobby'); $('lobbyMsg').textContent = errText(err); }).finally(() => { joinBtn.disabled = false; joinBtn.textContent = 'Join call'; });
+    join(user.display_name).catch(joinFailed).finally(() => { joinBtn.disabled = false; joinBtn.textContent = 'Join call'; });
   };
   $('memberForm').addEventListener('submit', (e) => { e.preventDefault(); joinAsMember(); });
   setTimeout(joinAsMember, 0); // no nickname to type, so go straight in (after this module finishes setting up)
 } else {
+  $('lobbyLogin').href = loginUrl;
   $('nick').value = localStorage.getItem('knock.nick') || '';
   $('nickForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const nickname = $('nick').value.trim();
-    if (nickname) join(nickname).catch((err) => { show('lobby'); $('lobbyMsg').textContent = errText(err); });
+    if (nickname) join(nickname).catch(joinFailed);
   });
 }
 
 let local = null;
 let selfId = null;
+let isHost = false;
+let leaving = false;
 const people = new Map(); // socket id -> name, for everyone in the call (including me)
 const recap = new Map(); // item id -> recap item
 let socket;
@@ -49,19 +60,19 @@ async function getMedia() {
   }
 }
 
-function addTile(id, name, mine, handle = null) {
+function addTile(id, name, mine, handle = null, avatarAt = null) {
   const video = h('video', { autoplay: true, playsinline: true });
   if (mine) video.muted = true;
-  const avatar = h('button', { class: 'tile-avatar', type: 'button', 'aria-label': `View ${name}’s profile`, title: 'View profile', onclick: () => openProfile({ name, handle, mine }) }, [...name][0]?.toUpperCase() || '?');
+  const avatar = h('button', { class: 'tile-avatar', type: 'button', 'aria-label': `View ${name}’s profile`, title: 'View profile', onclick: () => openProfile({ name, handle, mine, avatarAt }) }, avatarEl({ handle, display_name: name, avatar_at: avatarAt }, 38));
   const tile = h('figure', { class: 'vtile', 'data-id': id }, video, avatar, h('figcaption', {}, mine ? `${name} (you)` : name));
   $('grid').append(tile);
   return { tile, video };
 }
 
 /* ---------- WebRTC: the newcomer sends an offer to everyone already in the room ---------- */
-function makePeer(id, nickname, initiator, handle = null) {
+function makePeer(id, nickname, initiator, handle = null, avatarAt = null) {
   const pc = new RTCPeerConnection({ iceServers });
-  const { tile, video } = addTile(id, nickname, false, handle);
+  const { tile, video } = addTile(id, nickname, false, handle, avatarAt);
   const peer = { pc, tile, nickname, chain: Promise.resolve() };
   peers.set(id, peer);
   if (local) local.getTracks().forEach((t) => pc.addTrack(t, local));
@@ -83,8 +94,8 @@ function dropPeer(id) {
   p.tile.remove();
   peers.delete(id);
 }
-function onSignal({ from, nickname, handle, data }) {
-  const peer = peers.get(from) ?? makePeer(from, nickname, false, handle);
+function onSignal({ from, nickname, handle, avatarAt, data }) {
+  const peer = peers.get(from) ?? makePeer(from, nickname, false, handle, avatarAt);
   peer.chain = peer.chain.then(async () => {
     const { pc } = peer;
     if (data.description) {
@@ -113,23 +124,87 @@ async function join(nickname) {
   socket.on('recap:item', (item) => { recap.set(item.id, item); renderRecap(); if ($('side').hidden || $('paneRecap').hidden) $('recapBtn').classList.add('on'); });
   socket.on('recap:removed', ({ id }) => { recap.delete(id); renderRecap(); });
   socket.on('room:chat', ({ from, nickname: n, body }) => addChat(from === socket.id ? null : n, body, from === socket.id));
-  socket.on('disconnect', () => toast('Connection lost. Reload the page to rejoin.'));
+  socket.on('disconnect', () => { if (!leaving) toast('Connection lost. Reload the page to rejoin.'); });
+  socket.on('room:ended', () => { // the host ended the session for everyone
+    teardown();
+    socket.close();
+    $('endedMsg').textContent = 'The host ended this call, so the code no longer works. Start a new call any time.';
+    show('ended');
+  });
 
   const res = await new Promise((resolve) => socket.emit('room:join', { sessionId, nickname }, resolve));
   if (res.error) { local?.getTracks().forEach((t) => t.stop()); socket.close(); throw Object.assign(new Error(res.error), { code: res.error === 'room_full' ? 'room_full' : res.error }); }
 
   show('live');
   selfId = res.selfId;
+  isHost = !!res.host;
   const myName = res.nickname || nickname; // the server decides: display name for members, nickname for guests
   people.set(selfId, myName);
   res.peers.forEach((p) => people.set(p.id, p.nickname));
   (res.recap ?? []).forEach((i) => recap.set(i.id, i));
-  const mine = addTile('local', myName, true, user?.handle ?? null);
+  const mine = addTile('local', myName, true, user?.handle ?? null, user?.avatar_at ?? null);
   if (local) mine.video.srcObject = local;
-  res.peers.forEach((p) => makePeer(p.id, p.nickname, true, p.handle));
+  res.peers.forEach((p) => makePeer(p.id, p.nickname, true, p.handle, p.avatarAt));
   wireControls();
+  wireTopbar();
   renderRecap();
   refreshOwners();
+}
+
+/* ---------- top bar: show/hide the code, profile picture (members), log-in nudge (guests) ---------- */
+function wireTopbar() {
+  let codeShown = false; // starts hidden
+  const paintCode = () => {
+    renderCode($('miniCode'), sessionId, { masked: !codeShown });
+    const b = $('codeToggle');
+    b.replaceChildren(icon(codeShown ? 'eyeOff' : 'eye', 18));
+    b.setAttribute('aria-label', codeShown ? 'Hide session code' : 'Show session code');
+    b.setAttribute('aria-pressed', String(codeShown));
+    b.title = b.getAttribute('aria-label');
+  };
+  $('codeToggle').addEventListener('click', () => { codeShown = !codeShown; paintCode(); });
+  paintCode();
+
+  if (user) { $('profileSlot').replaceChildren(profileButton(user)); return; }
+  // Guests: offer to log in / sign up. Signing in sends them to /login and straight back to this call as a member.
+  $('guestBar').hidden = false;
+  $('guestClose').replaceChildren(icon('x', 16));
+  $('guestClose').addEventListener('click', () => ($('guestBar').hidden = true));
+  for (const id of ['guestLogin', 'guestSignup']) {
+    $(id).href = loginUrl;
+    $(id).addEventListener('click', async (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+      e.preventDefault();
+      const ok = await confirmDialog({ title: 'Leave the call to sign in?', body: 'You’ll step out of this call while you log in or create your account, then rejoin automatically with this same link.', confirmText: 'Continue', cancelText: 'Stay in call' });
+      if (ok) location.href = loginUrl;
+    });
+  }
+}
+
+/* ---------- leaving: the host ends the session for everyone, everyone else just leaves ---------- */
+function teardown() {
+  leaving = true;
+  local?.getTracks().forEach((t) => t.stop());
+  [...peers.keys()].forEach(dropPeer);
+}
+const endForEveryone = () => new Promise((resolve) => socket.timeout(4000).emit('room:end', (err, r) => resolve(!err && !!r?.ok)));
+async function requestExit(fromLogo = false) {
+  if (isHost) {
+    const ok = await confirmDialog({ title: 'End this session?', body: 'You started this call. Ending it closes the session for everyone in it, and the code stops working.', confirmText: 'End session', cancelText: 'Stay in call' });
+    if (!ok) return;
+    if (!(await endForEveryone())) return toast('Couldn’t end the session. Check your connection and try again.');
+    teardown();
+    socket.close();
+    flash('Session ended for everyone.');
+  } else {
+    if (fromLogo) {
+      const ok = await confirmDialog({ title: 'Leave this call?', body: 'You’ll go back to the homepage. You can rejoin with the same link while the call is still running.', confirmText: 'Leave call', cancelText: 'Stay in call' });
+      if (!ok) return;
+    }
+    socket.emit('room:leave');
+    teardown();
+  }
+  location.href = home;
 }
 
 /* ---------- controls + chat ---------- */
@@ -164,11 +239,11 @@ function wireControls() {
   $('recapForm').addEventListener('change', () => syncRecapForm());
   syncRecapForm();
   $('leave').replaceChildren(icon('leave', 22));
-  $('leave').addEventListener('click', () => {
-    socket.emit('room:leave');
-    local?.getTracks().forEach((t) => t.stop());
-    [...peers.keys()].forEach(dropPeer);
-    location.href = user ? '/dashboard' : '/';
+  $('leave').addEventListener('click', () => requestExit(false));
+  $('brandLive').addEventListener('click', (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // let "open in new tab" work normally
+    e.preventDefault();
+    requestExit(true);
   });
   $('copy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(location.href); toast('Invite link copied'); } catch { toast('Copy failed. Copy the address bar instead.'); }
@@ -231,7 +306,7 @@ function renderRecap() {
 
 /* ---------- profile card (tap someone's avatar) ---------- */
 let closeProfile = () => {};
-async function openProfile({ name, handle, mine }) {
+async function openProfile({ name, handle, mine, avatarAt = null }) {
   closeProfile();
   const opener = document.activeElement;
   const body = h('div', { class: 'pop-body' });
@@ -244,7 +319,7 @@ async function openProfile({ name, handle, mine }) {
   document.body.append(overlay);
   closeBtn.focus();
 
-  const head = (title, sub) => h('div', { class: 'profile-head' }, h('span', { class: 'tile avatar', 'aria-hidden': 'true' }, [...title][0]?.toUpperCase() || '?'), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, title), sub ? h('p', { class: 'sub' }, sub) : null));
+  const head = (title, sub, at = avatarAt) => h('div', { class: 'profile-head' }, avatarEl({ handle, display_name: title, avatar_at: at }, 64), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, title), sub ? h('p', { class: 'sub' }, sub) : null));
   if (!handle) { body.replaceChildren(head(name, 'Guest'), h('p', { class: 'hint' }, 'Joined with a nickname, so there’s no account profile to show.')); return; }
   if (!user) { body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Log in to see profiles and send friend requests.'), h('a', { class: 'btn primary', href: '/login?next=' + encodeURIComponent(location.pathname) }, 'Log in')); return; }
   body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Loading…'));
@@ -258,7 +333,7 @@ async function openProfile({ name, handle, mine }) {
       catch (err) { toast(errText(err)); }
     });
     body.replaceChildren(
-      head(p.display_name, '@' + p.handle),
+      head(p.display_name, '@' + p.handle, p.avatar_at),
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Display name'), h('dd', {}, p.display_name),
         h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),

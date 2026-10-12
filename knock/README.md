@@ -46,6 +46,10 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 | Smart recaps | During a call, the Recap tab lets anyone jot a decision or a follow-up with an owner (synced live, stored in `recap_items`). Everyone who was in the call sees it on their dashboard and can tick follow-ups off (`/api/recaps`) |
 | Profile card in a call | Tap anyone's avatar on their video tile: display name, name at signup, account creation date, and a Send friend request button (`/api/users/:handle`) |
 | Friends | Profile page `/u/<handle>` has the add-friend icon; the other person is notified. Friends panel: Unfriend on the left, green/gray dot on the right, online first |
+| Guest → account, mid-call | Guests see a bar in the call (and a link in the lobby) to log in or create an account. It sends them to `/login?next=/s/<code>` and they rejoin as a member, so others can then open their profile card |
+| Host ends the session | The creator (signed-in owner, or the signed per-session host cookie a guest creator gets) is the host. The host's Leave button and the top-left logo ask "End this session?"; confirming sends `room:end`, which removes everyone and marks the session ended (`call_sessions.ended_at`). Everyone else is asked to confirm only when clicking the logo |
+| Hide/show the code | Eye button in the call's top bar. The code is hidden when you enter |
+| Profile menu | Round picture button, top right (and in calls). Change display name, see account details (Gmail/email and mobile show `n/a` when empty), upload a picture up to 3 MB and crop it to the circle (`public/js/account.js`, `cropper.js`). Stored as a 256×256 JPEG in the `avatars` table; the server accepts only real PNG/JPEG/WebP bytes up to 512 KB |
 | CAPTCHA | reCAPTCHA gate at `/verify`. Every page, API route and WebSocket needs the signed "human" cookie it sets |
 | Hidden keys and endpoints | See below |
 

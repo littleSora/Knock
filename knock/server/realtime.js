@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import { parseCookie } from 'cookie';
 import cookieParser from 'cookie-parser';
-import { db, sessionExists } from './db.js';
+import { db, sessionInfo, endSession } from './db.js';
 import { cfg } from './env.js';
 import { userFromToken } from './auth.js';
 import { isHuman } from './security.js';
@@ -45,10 +45,19 @@ function leaveRoom(socket) {
   if (!room.size) rooms.delete(id);
 }
 
+// The host is the session's owner (signed-in creator) or whoever holds the signed host cookie made when they created it.
+function isHostOf(socket, id, info) {
+  if (info.owner_id != null && info.owner_id === socket.data.user?.id) return true;
+  const raw = socket.data.cookies?.['h_' + id];
+  return !!raw?.startsWith('s:') && cookieParser.signedCookie(raw, cfg.cookieSecret) === '1';
+}
+
 function joinRoom(socket, p = {}, ack) {
   const reply = typeof ack === 'function' ? ack : () => {};
   const id = normalizeSessionId(p.sessionId);
-  if (!isSessionId(id) || !sessionExists(id)) return reply({ error: 'session_not_found' });
+  const info = isSessionId(id) ? sessionInfo(id) : null;
+  if (!info) return reply({ error: 'session_not_found' });
+  if (info.ended_at) return reply({ error: 'session_ended' });
   // Signed-in people always appear under their display name; only guests choose a nickname.
   const user = socket.data.user;
   const nickname = user ? cleanName(user.display_name, 40) : cleanName(p.nickname, 24);
@@ -56,15 +65,17 @@ function joinRoom(socket, p = {}, ack) {
   if (socket.data.room) leaveRoom(socket);
   const room = rooms.get(id) ?? new Map();
   if (room.size >= MAX_PEOPLE) return reply({ error: 'room_full' });
-  const peers = [...room].map(([sid, m]) => ({ id: sid, nickname: m.nickname, handle: m.handle }));
+  const peers = [...room].map(([sid, m]) => ({ id: sid, nickname: m.nickname, handle: m.handle, avatarAt: m.avatarAt }));
   const handle = user?.handle ?? null; // lets other people open this person's profile card (guests have none)
-  room.set(socket.id, { nickname, userId: user?.id ?? null, handle });
+  const avatarAt = user?.avatar_at ?? null;
+  const host = isHostOf(socket, id, info);
+  room.set(socket.id, { nickname, userId: user?.id ?? null, handle, avatarAt, host });
   rooms.set(id, room);
   socket.data.room = id;
   socket.join(`r:${id}`);
-  socket.to(`r:${id}`).emit('room:peer-joined', { id: socket.id, nickname, handle });
+  socket.to(`r:${id}`).emit('room:peer-joined', { id: socket.id, nickname, handle, avatarAt });
   if (room.size >= 2) logCall(id, room);
-  reply({ ok: true, selfId: socket.id, nickname, peers, recap: recapItems.all(id).map(publicRecap) });
+  reply({ ok: true, selfId: socket.id, nickname, host, peers, recap: recapItems.all(id).map(publicRecap) });
 }
 
 const publicRecap = (r) => ({ id: r.id, kind: r.kind, body: r.body, owner_name: r.owner_name, owner_user_id: r.owner_user_id, done: !!r.done });
@@ -88,7 +99,7 @@ function onConnect(socket) {
     const room = roomId && rooms.get(roomId);
     if (!room || !msg || !room.has(msg.to) || typeof msg.data !== 'object') return;
     const me = room.get(socket.id);
-    io.to(msg.to).emit('room:signal', { from: socket.id, nickname: me.nickname, handle: me.handle, data: msg.data });
+    io.to(msg.to).emit('room:signal', { from: socket.id, nickname: me.nickname, handle: me.handle, avatarAt: me.avatarAt, data: msg.data });
   });
 
   /* ---------- smart recap: shared decisions + follow-ups for this call ---------- */
@@ -134,6 +145,21 @@ function onConnect(socket) {
     io.to(`r:${roomId}`).emit('room:chat', { from: socket.id, nickname: self.nickname, body, at: now });
   });
 
+  // Only the host can end the session: everyone is told, removed from the room, and the code stops working.
+  socket.on('room:end', (ack) => {
+    const reply = typeof ack === 'function' ? ack : () => {};
+    const ctx = inRoom();
+    if (!ctx || !ctx.room.get(socket.id)?.host) return reply({ error: 'not_host' });
+    endSession(ctx.roomId);
+    io.to(`r:${ctx.roomId}`).emit('room:ended', {});
+    for (const sid of ctx.room.keys()) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) { s.data.room = null; s.leave(`r:${ctx.roomId}`); }
+    }
+    rooms.delete(ctx.roomId);
+    reply({ ok: true });
+  });
+
   socket.on('room:leave', () => leaveRoom(socket));
 
   socket.on('disconnect', () => {
@@ -168,6 +194,7 @@ export function attachRealtime(server) {
     const signed = cookies.human?.startsWith('s:') ? cookieParser.signedCookie(cookies.human, cfg.cookieSecret) : false;
     if (!signed || !isHuman(signed)) return next(new Error('captcha_required'));
     socket.data.user = userFromToken(cookies.sid);
+    socket.data.cookies = cookies; // read later for the per-session host cookie
     next();
   });
 
