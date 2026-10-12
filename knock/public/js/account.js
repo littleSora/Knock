@@ -26,6 +26,7 @@ async function uploadAvatar(blob) {
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 
 async function openAccount(user) {
+  const inCall = location.pathname.startsWith('/s/');
   const body = h('div', {}, h('p', { class: 'hint' }, 'Loading…'));
   const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close profile', onclick: () => m.close() }, icon('x', 16));
   const m = openModal({ label: 'Your profile', wide: true }, h('div', { class: 'pop-head' }, h('span', { class: 'grow' }), closeBtn), body);
@@ -104,6 +105,8 @@ async function openAccount(user) {
         h('dt', {}, 'Gmail / email'), h('dd', {}, na(me.email)),
         h('dt', {}, 'Mobile number'), h('dd', {}, na(me.phone)),
         h('dt', {}, 'Sign-in methods'), h('dd', {}, methods),
-        h('dt', {}, 'Account created'), h('dd', {}, fmtDate(me.created_at))));
+        h('dt', {}, 'Account created'), h('dd', {}, fmtDate(me.created_at))),
+      // In a call, Settings opens in a new tab so you don't leave the call.
+      h('a', { class: 'btn sm settings-link', href: '/settings', ...(inCall ? { target: '_blank', rel: 'noopener' } : {}) }, h('span', { class: 'btn-ic' }, icon('gear', 16)), 'Settings'));
   }
 }

@@ -109,6 +109,11 @@ if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'signup
   db.exec('UPDATE users SET signup_name = display_name WHERE signup_name IS NULL');
 }
 
+// Saved look of the app (JSON, validated by public/js/theme-core.js). NULL = default.
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'theme')) {
+  db.exec('ALTER TABLE users ADD COLUMN theme TEXT');
+}
+
 export function createSession(ownerId = null) {
   const insert = db.prepare('INSERT OR IGNORE INTO call_sessions(id, owner_id, created_at) VALUES (?, ?, ?)');
   for (;;) {

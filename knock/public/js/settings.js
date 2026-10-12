@@ -1,0 +1,247 @@
+import { api, h, errText, toast, confirmDialog } from './common.js';
+import { mountTopbar } from './topbar.js';
+import { PRESETS, resolve, specOf, toCustom, readability, parseTheme } from './theme-core.js';
+import { setTheme, getTheme, prefersDark } from './theme.js';
+import { ColorWheel } from './colorwheel.js';
+
+const { user } = await api('/api/auth/me');
+if (!user) location.replace('/login?next=/settings');
+mountTopbar(user);
+const root = document.getElementById('settings');
+const [{ user: me }, cfg] = await Promise.all([api('/api/me'), api('/api/config').catch(() => ({}))]);
+const announce = () => window.dispatchEvent(new Event('profile-updated'));
+const section = (id, title, ...kids) => h('section', { class: 'block set-block', 'aria-labelledby': id }, h('h2', { id }, title), ...kids);
+
+/* =====================================================================================
+   Appearance
+   ===================================================================================== */
+function appearance() {
+  const saveState = h('span', { class: 'save-state', role: 'status' });
+  let timer;
+  const save = (theme) => {
+    clearTimeout(timer);
+    saveState.textContent = 'Saving…';
+    timer = setTimeout(async () => {
+      try { await api('/api/me/theme', { method: 'PUT', body: { theme } }); saveState.textContent = 'Saved to your account'; }
+      catch (err) { saveState.textContent = ''; toast(errText(err)); }
+    }, 500);
+  };
+  // The theme the person is looking at. No saved theme means the default look, which is the Day preset.
+  const shown = () => getTheme() ?? { preset: 'day' };
+
+  /* ----- presets ----- */
+  const previewBg = (p) => {
+    if (p.id === 'auto') {
+      const l = resolve(specOf({ preset: 'day' })).vars, d = resolve(specOf({ preset: 'night' })).vars;
+      return `linear-gradient(135deg, ${l['--paper']} 50%, ${d['--paper']} 50%)`;
+    }
+    return resolve(p.spec).vars['--page'];
+  };
+  const cards = PRESETS.map((p) => {
+    const v = p.spec ? resolve(p.spec).vars : null;
+    const btn = h('button', { type: 'button', class: 'theme-card', role: 'radio', onclick: () => choose({ preset: p.id }) },
+      h('span', { class: 'theme-prev', style: `background:${previewBg(p)}` },
+        v ? [h('i', { style: `background:${v['--pink']}` }), h('i', { style: `background:${v['--yellow']}` }), h('b', { style: `background:${v['--card']};border-color:${v['--ink']}` })] : null),
+      h('span', { class: 'theme-name' }, p.name));
+    btn.dataset.id = p.id;
+    return btn;
+  });
+  const grid = h('div', { class: 'theme-grid', role: 'radiogroup', 'aria-label': 'Theme presets' }, cards);
+  function markPresets() {
+    const t = shown();
+    for (const c of cards) { const on = t.preset === c.dataset.id; c.setAttribute('aria-checked', String(on)); c.classList.toggle('on', on); }
+  }
+  function choose(theme) {
+    setTheme(theme);
+    save(theme);
+    loadCustomFromTheme();
+    markPresets();
+  }
+
+  /* ----- custom colours ----- */
+  let custom = toCustom(shown(), prefersDark()).custom;
+  let editing = 'a'; // which colour the wheel is changing: a (background), b (gradient end), accent, highlight
+  const SLOTS = [
+    { key: 'a', label: () => (custom.bg.kind === 'gradient' ? 'Gradient start' : 'Background'), get: () => custom.bg.a },
+    { key: 'b', label: () => 'Gradient end', get: () => custom.bg.b, only: () => custom.bg.kind === 'gradient' },
+    { key: 'accent', label: () => 'Buttons & links', get: () => custom.accent },
+    { key: 'highlight', label: () => 'Highlights', get: () => custom.highlight },
+  ];
+  const wheel = ColorWheel(custom.bg.a, (hex) => {
+    if (editing === 'a') custom.bg.a = hex;
+    else if (editing === 'b') custom.bg.b = hex;
+    else custom[editing] = hex;
+    applyCustom();
+  }, { label: 'Colour' });
+  const chips = h('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Which colour to change' });
+  const angle = h('input', { type: 'range', min: '0', max: '359', id: 'gAngle' });
+  angle.addEventListener('input', () => { custom.bg.angle = Number(angle.value); applyCustom(); });
+  const angleRow = h('label', { class: 'angle-row', for: 'gAngle' }, 'Gradient direction', angle);
+  const kindBtns = ['solid', 'gradient'].map((k) => h('button', { type: 'button', class: 'tab', role: 'radio', onclick: () => setKind(k) }, k === 'solid' ? 'Solid colour' : 'Gradient'));
+  const toneBtns = [[undefined, 'Auto'], ['light', 'Dark text'], ['dark', 'Light text']].map(([t, name]) =>
+    h('button', { type: 'button', class: 'tab', role: 'radio', onclick: () => { t ? (custom.tone = t) : delete custom.tone; applyCustom(); } }, name));
+  const toneVals = [undefined, 'light', 'dark'];
+  const readout = h('p', { class: 'hint', role: 'status' });
+  const strip = h('div', { class: 'strip', 'aria-hidden': 'true' });
+
+  function setKind(k) {
+    if (k === custom.bg.kind) return;
+    custom.bg = k === 'gradient' ? { kind: 'gradient', a: custom.bg.a, b: custom.accent, angle: 135 } : { kind: 'solid', a: custom.bg.a };
+    if (k === 'solid' && editing === 'b') editing = 'a';
+    applyCustom(); refreshCustomUi();
+  }
+  function refreshCustomUi() {
+    const slots = SLOTS.filter((s) => !s.only || s.only());
+    chips.replaceChildren(...slots.map((s) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(s.key === editing), class: 'chip' + (s.key === editing ? ' on' : ''),
+      onclick: () => { editing = s.key; wheel.set(s.get()); refreshCustomUi(); } },
+      h('i', { style: `background:${s.get()}` }), s.label())));
+    kindBtns.forEach((b, i) => { const on = (i ? 'gradient' : 'solid') === custom.bg.kind; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
+    toneBtns.forEach((b, i) => { const on = toneVals[i] === custom.tone; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
+    angleRow.hidden = custom.bg.kind !== 'gradient';
+    angle.value = String(custom.bg.angle ?? 135);
+    strip.style.background = resolve(custom).vars['--page'];
+    const r = readability(custom);
+    readout.textContent = r >= 4.5 ? `Text is easy to read on this background (${r.toFixed(1)}:1).` : `Text may be hard to read on this background (${r.toFixed(1)}:1). Try a lighter or darker background, or change the text colour above.`;
+    readout.classList.toggle('error', r < 4.5);
+  }
+  function applyCustom() {
+    const theme = parseTheme({ preset: 'custom', custom });
+    setTheme(theme); save(theme); markPresets(); refreshCustomUi();
+  }
+  // When the active theme changes (a preset click), the editor starts from that look.
+  function loadCustomFromTheme() {
+    custom = toCustom(shown(), prefersDark()).custom;
+    if (custom.bg.kind !== 'gradient' && editing === 'b') editing = 'a';
+    wheel.set(SLOTS.find((s) => s.key === editing).get());
+    refreshCustomUi();
+  }
+
+  const reset = h('button', { type: 'button', class: 'btn sm', onclick: async () => {
+    setTheme(null); loadCustomFromTheme(); markPresets();
+    try { await api('/api/me/theme', { method: 'DELETE' }); saveState.textContent = 'Back to the default look'; } catch (err) { toast(errText(err)); }
+  } }, 'Reset to default');
+
+  markPresets();
+  refreshCustomUi();
+  return section('apH', 'Appearance',
+    h('p', { class: 'hint' }, 'Pick a look and it changes the whole app right away. It’s saved to your account, so it follows you to other devices.'),
+    h('div', { class: 'set-head' }, h('h3', { style: 'margin:0' }, 'Presets'), saveState),
+    grid,
+    h('h3', {}, 'Make your own'),
+    h('p', { class: 'hint' }, 'Choose a solid colour or a gradient, then tap a colour below and drag on the wheel. The preview is the real page, so you’ll see it change as you go.'),
+    h('div', { class: 'tabs seg', role: 'radiogroup', 'aria-label': 'Background style' }, kindBtns),
+    chips,
+    wheel.el,
+    angleRow,
+    strip,
+    h('h3', {}, 'Text style'),
+    h('div', { class: 'tabs seg', role: 'radiogroup', 'aria-label': 'Text style' }, toneBtns),
+    readout,
+    h('div', { class: 'set-actions' }, reset));
+}
+
+/* =====================================================================================
+   Sign-in & contact: change email / phone with a code sent to the new one
+   ===================================================================================== */
+function contactRow(channel) {
+  const isEmail = channel === 'email';
+  const label = isEmail ? 'Gmail / email' : 'Mobile number';
+  const row = h('div', { class: 'contact' });
+  let step = 'view'; // view | enter | code
+  let pending = '';
+
+  async function remove() {
+    const ok = await confirmDialog({ title: `Remove your ${isEmail ? 'email' : 'phone number'}?`, body: `You won’t be able to sign in with it anymore. You can add one again later.`, confirmText: 'Remove', cancelText: 'Keep it' });
+    if (!ok) return;
+    try { await api('/api/auth/contact/' + channel, { method: 'DELETE' }); me[channel] = null; toast('Removed'); step = 'view'; render(); }
+    catch (err) { toast(errText(err)); }
+  }
+  function render() {
+    const msg = h('p', { class: 'error', role: 'alert' });
+    const value = me[channel];
+    const head = h('div', { class: 'contact-head' },
+      h('div', {}, h('div', { class: 'sub' }, label), h('div', { class: 'name wrap' }, value || 'n/a')),
+      step === 'view' ? h('div', { class: 'contact-actions' },
+        h('button', { type: 'button', class: 'btn sm', onclick: () => { step = 'enter'; render(); } }, value ? 'Change' : 'Add'),
+        value ? h('button', { type: 'button', class: 'link-btn danger', onclick: remove }, 'Remove') : null) : null);
+    let form = null;
+    if (step === 'enter') {
+      const input = h('input', { id: `new-${channel}`, type: isEmail ? 'email' : 'tel', autocomplete: isEmail ? 'email' : 'tel', required: true, 'data-autofocus': '', placeholder: isEmail ? 'new@gmail.com' : '+639171234567' });
+      const go = h('button', { class: 'btn sm' }, 'Send code');
+      form = h('form', { class: 'contact-form' },
+        h('label', { for: `new-${channel}` }, isEmail ? 'New email address' : 'New phone number (with country code)'),
+        input, h('p', { class: 'hint' }, `We’ll send a 6-digit code to the new ${isEmail ? 'address' : 'number'} to make sure it’s yours.`),
+        h('div', { class: 'set-actions' }, go, h('button', { type: 'button', class: 'link-btn', onclick: () => { step = 'view'; render(); } }, 'Cancel')), msg);
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault(); msg.textContent = ''; go.disabled = true;
+        try { await api('/api/auth/contact/request', { method: 'POST', body: { channel, target: input.value } }); pending = input.value.trim(); step = 'code'; render(); }
+        catch (err) { go.disabled = false; msg.textContent = errText(err); }
+      });
+      queueMicrotask(() => input.focus());
+    } else if (step === 'code') {
+      const input = h('input', { id: `code-${channel}`, inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6', required: true });
+      const go = h('button', { class: 'btn sm' }, 'Confirm');
+      form = h('form', { class: 'contact-form' },
+        h('label', { for: `code-${channel}` }, '6-digit code'), input,
+        h('p', { class: 'hint' }, `Sent to ${pending}.` + (cfg.devMode ? ' (Dev mode: the code is printed in the server terminal.)' : '')),
+        h('div', { class: 'set-actions' }, go, h('button', { type: 'button', class: 'link-btn', onclick: () => { step = 'enter'; render(); } }, 'Use a different one')), msg);
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault(); msg.textContent = ''; go.disabled = true;
+        try {
+          const r = await api('/api/auth/contact/verify', { method: 'POST', body: { channel, target: pending, code: input.value } });
+          me[channel] = r[channel]; step = 'view'; toast(`${isEmail ? 'Email' : 'Phone number'} updated`); render();
+        } catch (err) { go.disabled = false; msg.textContent = errText(err); }
+      });
+      queueMicrotask(() => input.focus());
+    }
+    row.replaceChildren(...[head, form].filter(Boolean));
+  }
+  render();
+  return row;
+}
+
+function signIn() {
+  return section('siH', 'Email, phone and sign-in',
+    h('p', { class: 'hint' }, 'These are the ways you can sign in. A new email or number only replaces the old one after you enter the code we send to it.'),
+    contactRow('email'), contactRow('phone'),
+    h('div', { class: 'contact' }, h('div', { class: 'contact-head' }, h('div', {},
+      h('div', { class: 'sub' }, 'Google'),
+      h('div', { class: 'name wrap' }, me.has_google ? 'Linked' : 'Not linked'),
+      me.has_google ? null : h('p', { class: 'hint' }, 'Sign in once with “Continue with Google” using the same email address as above and it links automatically.')))));
+}
+
+/* =====================================================================================
+   Profile names + security
+   ===================================================================================== */
+function names() {
+  const msg = h('p', { class: 'error', role: 'alert' });
+  const name = h('input', { id: 'sName', maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name });
+  const nameForm = h('form', {}, h('label', { for: 'sName' }, 'Display name'), name, h('button', { class: 'btn sm' }, 'Save name'));
+  nameForm.addEventListener('submit', async (e) => {
+    e.preventDefault(); msg.textContent = '';
+    try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: name.value } }); me.display_name = user.display_name = r.display_name; announce(); toast('Name saved'); }
+    catch (err) { msg.textContent = errText(err); }
+  });
+  const handle = h('input', { id: 'sHandle', maxlength: '20', required: true, autocomplete: 'username', spellcheck: 'false', value: me.handle });
+  const handleForm = h('form', {}, h('label', { for: 'sHandle' }, 'Username'), handle,
+    h('p', { class: 'hint' }, '3 to 20 letters or numbers. Friends find you with @username, and your profile link uses it. You can change it up to 5 times an hour.'),
+    h('button', { class: 'btn sm' }, 'Save username'));
+  handleForm.addEventListener('submit', async (e) => {
+    e.preventDefault(); msg.textContent = '';
+    try { const r = await api('/api/me/username', { method: 'PATCH', body: { handle: handle.value } }); me.handle = user.handle = r.handle; handle.value = r.handle; announce(); toast('Username saved'); }
+    catch (err) { msg.textContent = errText(err); }
+  });
+  return section('prH', 'Your names', nameForm, handleForm, msg);
+}
+
+function security() {
+  const btn = h('button', { type: 'button', class: 'btn sm', onclick: async () => {
+    const ok = await confirmDialog({ title: 'Sign out of other devices?', body: 'Every other phone or computer signed in to your account will be logged out. This device stays signed in.', confirmText: 'Sign them out', cancelText: 'Cancel' });
+    if (!ok) return;
+    try { const r = await api('/api/auth/signout-others', { method: 'POST' }); toast(r.signedOut ? `Signed out of ${r.signedOut} other ${r.signedOut === 1 ? 'login' : 'logins'}` : 'No other devices were signed in'); }
+    catch (err) { toast(errText(err)); }
+  } }, 'Sign out of other devices');
+  return section('seH', 'Security', h('p', { class: 'hint' }, 'Lost a phone or used a shared computer? End every other login at once.'), h('div', { class: 'set-actions' }, btn));
+}
+
+root.replaceChildren(appearance(), signIn(), names(), security());

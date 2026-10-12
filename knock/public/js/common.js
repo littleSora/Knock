@@ -1,3 +1,5 @@
+import { adoptServerTheme } from './theme.js';
+
 export const $ = (sel, root = document) => root.querySelector(sel);
 
 // Tiny element builder. Text goes in via append(), never innerHTML, so user-supplied names/messages can't inject markup.
@@ -30,6 +32,7 @@ const ICONS = {
   recap: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/>',
 };
 export function icon(name, size = 20) {
@@ -59,6 +62,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     throw Object.assign(new Error('captcha_required'), { code: 'captcha_required' });
   }
   if (!res.ok) throw Object.assign(new Error(data.error || 'request_failed'), { status: res.status, code: data.error });
+  if (path === '/api/auth/me' && data.user && data.theme) adoptServerTheme(data.theme); // the account's saved theme follows the person across devices
   return data;
 }
 
@@ -71,6 +75,13 @@ const MESSAGES = {
   session_not_found: 'No session matches that code. Check it with the person who shared it.',
   google_failed: 'Google sign-in didn’t work. Try again.',
   session_ended: 'That session has ended.',
+  already_in_use: 'That is already used by another account.',
+  same_as_current: 'That is already on your account.',
+  last_sign_in_method: 'You need at least one way to sign in, so this one can’t be removed.',
+  invalid_username: 'Usernames are 3 to 20 letters or numbers.',
+  username_taken: 'That username is taken. Try another.',
+  invalid_name: 'Enter a name.',
+  invalid_theme: 'That theme isn’t valid.',
   image_too_large: 'That picture is too big. Try a smaller crop.',
   invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG or WebP.',
 };

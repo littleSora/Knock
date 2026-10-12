@@ -6,6 +6,7 @@ import { requireUser as needUser } from './auth.js';
 import { normalizeSessionId, isSessionId, cleanName, cleanBody } from './util.js';
 import { isOnline, emitTo, roomCount } from './realtime.js';
 import { isProd } from './env.js';
+import { parseTheme } from '../public/js/theme-core.js';
 
 export const api = Router();
 const DAY = 86_400_000;
@@ -59,12 +60,39 @@ api.get('/me', needUser, (req, res) => {
   const u = db
     .prepare(
       `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email, phone,
-         google_sub IS NOT NULL AS has_google, created_at,
+         google_sub IS NOT NULL AS has_google, created_at, theme,
          (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at
        FROM users WHERE id = ?`,
     )
     .get(req.user.id);
-  res.json({ user: { ...u, has_google: !!u.has_google } });
+  let theme = null;
+  try { theme = u.theme ? JSON.parse(u.theme) : null; } catch { /* ignore a bad stored value */ }
+  delete u.theme;
+  res.json({ user: { ...u, has_google: !!u.has_google }, theme });
+});
+
+// The look of the app is saved on the account so it follows the person to every device.
+api.put('/me/theme', needUser, limiter(60), (req, res) => {
+  const theme = parseTheme(req.body?.theme);
+  if (!theme) return res.status(400).json({ error: 'invalid_theme' });
+  db.prepare('UPDATE users SET theme = ? WHERE id = ?').run(JSON.stringify(theme), req.user.id);
+  res.json({ ok: true, theme });
+});
+api.delete('/me/theme', needUser, (req, res) => {
+  db.prepare('UPDATE users SET theme = NULL WHERE id = ?').run(req.user.id);
+  res.json({ ok: true });
+});
+
+api.patch('/me/username', needUser, limiter(5, 3_600_000), (req, res) => {
+  const handle = String(req.body?.handle ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9]{3,20}$/.test(handle)) return res.status(400).json({ error: 'invalid_username' });
+  if (handle === req.user.handle) return res.json({ ok: true, handle });
+  try {
+    db.prepare('UPDATE users SET handle = ? WHERE id = ?').run(handle, req.user.id);
+  } catch {
+    return res.status(409).json({ error: 'username_taken' }); // handle is UNIQUE
+  }
+  res.json({ ok: true, handle });
 });
 
 // The browser crops the picture to a 256px square first (after checking the 3 MB limit on the original file),

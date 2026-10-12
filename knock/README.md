@@ -50,8 +50,17 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 | Host ends the session | The creator (signed-in owner, or the signed per-session host cookie a guest creator gets) is the host. The host's Leave button and the top-left logo ask "End this session?"; confirming sends `room:end`, which removes everyone and marks the session ended (`call_sessions.ended_at`). Everyone else is asked to confirm only when clicking the logo |
 | Hide/show the code | Eye button in the call's top bar. The code is hidden when you enter |
 | Profile menu | Round picture button, top right (and in calls). Change display name, see account details (Gmail/email and mobile show `n/a` when empty), upload a picture up to 3 MB and crop it to the circle (`public/js/account.js`, `cropper.js`). Stored as a 256×256 JPEG in the `avatars` table; the server accepts only real PNG/JPEG/WebP bytes up to 512 KB |
+| Settings page | **Settings** button at the bottom of the account info (round picture, top right) opens `/settings` (a new tab when you're in a call). Sections: Appearance, Email/phone/sign-in, Names, Security. See below |
 | CAPTCHA | reCAPTCHA gate at `/verify`. Every page, API route and WebSocket needs the signed "human" cookie it sets |
 | Hidden keys and endpoints | See below |
+
+## Settings page (`/settings`)
+
+- **Appearance** (`public/js/theme-core.js`, `theme.js`, `colorwheel.js`): 10 presets (Match my device, Day, Night, High contrast, High contrast light, and gradients Sunset, Ocean, Candy, Aurora, Nebula) or build your own with a real colour wheel, hex box and brightness slider for the background (solid or two-colour gradient with direction), buttons and highlights. Text colour is picked automatically for readability (with a warning if the background makes text hard to read, and a manual Dark/Light text override). The whole app restyles live and the theme is saved on the account (`users.theme`, `PUT/DELETE /api/me/theme`), cached in `localStorage` and replayed by `theme-boot.js` before first paint so there is no flash.
+- **Change email or phone**: the new address/number gets a 6-digit code and only replaces the old one after you enter it (`/api/auth/contact/request` and `/verify`, same hashing, 10-minute expiry and 5-attempt limit as sign-in). A number or address already used by another account is refused. You can remove one as long as another way to sign in remains.
+- **Names**: display name and username (3-20 lowercase letters/numbers, unique, 5 changes per hour).
+- **Security**: "Sign out of other devices" ends every other login for the account.
+- In development the change-of-email/phone codes are printed in the terminal, like sign-in codes.
 
 ## Security notes
 
@@ -68,4 +77,4 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 - Calls are peer-to-peer mesh, comfortable up to about 6 people (`MAX_PEOPLE` in `server/realtime.js`). Larger rooms need an SFU such as LiveKit.
 - A "call" for the dashboard is a session where you were present with at least one other person.
 - Run a single server process; presence and live rooms are kept in memory.
-- Not included yet: blocking/reporting, account deletion, email/SMS cost controls beyond rate limits.
+- Not included yet: blocking/reporting, account deletion, linking Google from Settings (it links automatically the first time you use Google with the same email), email/SMS cost controls beyond rate limits.

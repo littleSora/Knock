@@ -102,36 +102,55 @@ const google = new OAuth2Client();
 
 export const auth = Router();
 
-auth.get('/me', (req, res) => res.json({ user: req.user }));
+auth.get('/me', (req, res) => {
+  const row = req.user && db.prepare('SELECT theme FROM users WHERE id = ?').get(req.user.id);
+  let theme = null;
+  try { theme = row?.theme ? JSON.parse(row.theme) : null; } catch { /* bad stored value: ignore */ }
+  res.json({ user: req.user, theme });
+});
+
+// Shared by sign-in and by "change my email / phone". `key` is what the code is stored under (the target itself for
+// sign-in, "chg:<user>:<channel>:<target>" for a change, so the two can never overwrite each other).
+async function sendOtp(key, channel, to) {
+  const prev = db.prepare('SELECT expires_at FROM otps WHERE target = ?').get(key);
+  if (prev && prev.expires_at - OTP_TTL > Date.now() - 30_000) return 'wait_before_resend';
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  db.prepare('INSERT OR REPLACE INTO otps(target, code_hash, expires_at, attempts) VALUES (?,?,?,0)').run(
+    key, hmac(cfg.cookieSecret, `${key}:${code}`), Date.now() + OTP_TTL,
+  );
+  try {
+    await deliver(channel, to, code);
+  } catch (err) {
+    console.error('Code delivery failed:', err.message);
+    return 'delivery_failed';
+  }
+  return null;
+}
+// Returns null when the code is right (and uses it up), otherwise the error code to send back.
+function checkOtp(key, code) {
+  const row = db.prepare('SELECT * FROM otps WHERE target = ?').get(key);
+  if (!row || row.expires_at < Date.now() || row.attempts >= 5) return 'code_expired';
+  db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE target = ?').run(key);
+  if (!safeEqual(row.code_hash, hmac(cfg.cookieSecret, `${key}:${String(code ?? '').trim()}`))) return 'wrong_code';
+  db.prepare('DELETE FROM otps WHERE target = ?').run(key);
+  return null;
+}
+const FAIL_STATUS = { wait_before_resend: 429, delivery_failed: 502, code_expired: 400, wrong_code: 400 };
 
 auth.post('/otp/request', authLimiter, async (req, res) => {
   const { channel } = req.body ?? {};
   const target = normalizeTarget(channel, req.body?.target);
   if (!target) return res.status(400).json({ error: 'invalid_target' });
-  const prev = db.prepare('SELECT expires_at FROM otps WHERE target = ?').get(target);
-  if (prev && prev.expires_at - OTP_TTL > Date.now() - 30_000) return res.status(429).json({ error: 'wait_before_resend' });
-  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-  db.prepare('INSERT OR REPLACE INTO otps(target, code_hash, expires_at, attempts) VALUES (?,?,?,0)').run(
-    target, hmac(cfg.cookieSecret, `${target}:${code}`), Date.now() + OTP_TTL,
-  );
-  try {
-    await deliver(channel, target, code);
-  } catch (err) {
-    console.error('Code delivery failed:', err.message);
-    return res.status(502).json({ error: 'delivery_failed' });
-  }
+  const fail = await sendOtp(target, channel, target);
+  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
   res.json({ ok: true }); // same response whether or not an account exists
 });
 
 auth.post('/otp/verify', authLimiter, (req, res) => {
   const { channel } = req.body ?? {};
   const target = normalizeTarget(channel, req.body?.target);
-  const row = target && db.prepare('SELECT * FROM otps WHERE target = ?').get(target);
-  if (!row || row.expires_at < Date.now() || row.attempts >= 5) return res.status(400).json({ error: 'code_expired' });
-  db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE target = ?').run(target);
-  const guess = hmac(cfg.cookieSecret, `${target}:${String(req.body?.code ?? '').trim()}`);
-  if (!safeEqual(row.code_hash, guess)) return res.status(400).json({ error: 'wrong_code' });
-  db.prepare('DELETE FROM otps WHERE target = ?').run(target);
+  const fail = target ? checkOtp(target, req.body?.code) : 'code_expired';
+  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
   const user = findOrCreateUser(channel === 'email' ? { email: target } : { phone: target });
   issueSession(res, user.id);
   res.json({ ok: true });
@@ -162,4 +181,52 @@ auth.post('/logout', (req, res) => {
   if (req.cookies.sid) db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(sha256(req.cookies.sid));
   res.clearCookie('sid', { path: '/' });
   res.json({ ok: true });
+});
+
+/* ---------- change email / phone (the new one must be proven with a code sent to it) ---------- */
+const changeKey = (uid, channel, target) => `chg:${uid}:${channel}:${target}`;
+const takenBy = (channel, target, uid) =>
+  !!db.prepare(`SELECT 1 FROM users WHERE ${channel === 'email' ? 'email' : 'phone'} = ? AND id != ?`).get(target, uid);
+
+auth.post('/contact/request', requireUser, authLimiter, async (req, res) => {
+  const { channel } = req.body ?? {};
+  const target = normalizeTarget(channel, req.body?.target);
+  if (!target) return res.status(400).json({ error: 'invalid_target' });
+  const me = db.prepare('SELECT email, phone FROM users WHERE id = ?').get(req.user.id);
+  if (me[channel] === target) return res.status(400).json({ error: 'same_as_current' });
+  if (takenBy(channel, target, req.user.id)) return res.status(409).json({ error: 'already_in_use' });
+  const fail = await sendOtp(changeKey(req.user.id, channel, target), channel, target);
+  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  res.json({ ok: true });
+});
+
+auth.post('/contact/verify', requireUser, authLimiter, (req, res) => {
+  const { channel } = req.body ?? {};
+  const target = normalizeTarget(channel, req.body?.target);
+  if (!target) return res.status(400).json({ error: 'invalid_target' });
+  const fail = checkOtp(changeKey(req.user.id, channel, target), req.body?.code);
+  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  try {
+    db.prepare(`UPDATE users SET ${channel === 'email' ? 'email' : 'phone'} = ? WHERE id = ?`).run(target, req.user.id);
+  } catch {
+    return res.status(409).json({ error: 'already_in_use' }); // someone else verified it first
+  }
+  res.json({ ok: true, [channel]: target });
+});
+
+// Removing one is fine as long as another way to sign in is left.
+auth.delete('/contact/:channel', requireUser, (req, res) => {
+  const channel = req.params.channel;
+  if (channel !== 'email' && channel !== 'phone') return res.status(400).json({ error: 'invalid_target' });
+  const u = db.prepare('SELECT email, phone, google_sub FROM users WHERE id = ?').get(req.user.id);
+  const other = channel === 'email' ? u.phone : u.email;
+  if (!other && !u.google_sub) return res.status(400).json({ error: 'last_sign_in_method' });
+  db.prepare(`UPDATE users SET ${channel} = NULL WHERE id = ?`).run(req.user.id);
+  res.json({ ok: true });
+});
+
+// "Sign out of other devices": ends every login for this account except the one making the request.
+auth.post('/signout-others', requireUser, (req, res) => {
+  const info = db.prepare('DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?').run(req.user.id, sha256(req.cookies.sid));
+  res.json({ ok: true, signedOut: Number(info.changes) });
 });
