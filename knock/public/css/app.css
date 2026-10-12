@@ -268,3 +268,16 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .name.wrap { white-space: normal; overflow-wrap: anywhere; }
 .contact-form { max-width: 22rem; margin-top: 0.4rem; }
 .settings .tabs.seg .tab { flex: 1; }
+
+/* Clickable names in chat headers: look like text, no underline */
+.name-btn { background: none; border: 0; padding: 0.1rem 0.2rem; margin: 0 -0.2rem; font: 700 1rem var(--body); color: inherit; text-decoration: none; cursor: pointer; border-radius: 6px; max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-btn:hover { background: rgba(0, 0, 0, 0.08); }
+.name-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* Group creation + info */
+.chips { list-style: none; margin: 0 0 0.9rem; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0.7rem; background: var(--paper); border: 2px solid var(--ink); border-radius: 999px; font-weight: 600; font-size: 0.9rem; }
+.chip-x { display: inline-grid; place-items: center; background: none; border: 0; padding: 0.15rem; margin-right: -0.4rem; color: inherit; cursor: pointer; border-radius: 50%; }
+.chip-x:hover { background: rgba(0, 0, 0, 0.12); }
+.pick-row { flex-direction: row; align-items: center; gap: 0.7rem; }
+.pick-text { display: flex; flex-direction: column; min-width: 0; align-items: flex-start; }
+.member-tag { font-size: 0.78rem; font-weight: 700; padding: 0.05rem 0.5rem; border: 2px solid var(--ink); border-radius: 999px; background: var(--yellow); color: var(--on-yellow); }

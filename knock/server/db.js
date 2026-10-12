@@ -89,6 +89,28 @@ CREATE TABLE IF NOT EXISTS recap_items (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recap_by_session ON recap_items(session_id);
+-- Group chats: created from a friend's profile card. Members are always friends of the creator at creation time.
+CREATE TABLE IF NOT EXISTS group_chats (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id INTEGER NOT NULL REFERENCES group_chats(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (group_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS group_members_by_user ON group_members(user_id);
+CREATE TABLE IF NOT EXISTS group_messages (
+  id INTEGER PRIMARY KEY,
+  group_id INTEGER NOT NULL REFERENCES group_chats(id) ON DELETE CASCADE,
+  from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS group_messages_by_group ON group_messages(group_id, id);
 -- Profile pictures: the browser crops to a small square before upload, so each row is tiny.
 CREATE TABLE IF NOT EXISTS avatars (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

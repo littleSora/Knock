@@ -210,7 +210,7 @@ api.get('/users/:handle', needUser, (req, res) => {
 /* ---------- friends ---------- */
 api.get('/friends', needUser, (req, res) => {
   const rows = db
-    .prepare('SELECT u.id, u.handle, u.display_name FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = ?')
+    .prepare('SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = ?')
     .all(req.user.id)
     .map((f) => ({ ...f, online: isOnline(f.id) }));
   rows.sort((a, b) => b.online - a.online || a.display_name.localeCompare(b.display_name)); // online first
@@ -296,4 +296,101 @@ api.get('/notifications', needUser, (req, res) => {
 api.post('/notifications/read', needUser, (req, res) => {
   db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(Date.now(), req.user.id);
   res.json({ ok: true });
+});
+
+/* ---------- group chats ---------- */
+const MAX_GROUP = 20;
+const isMember = (groupId, userId) => !!db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, userId);
+const memberIds = (groupId) => db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(groupId).map((r) => r.user_id);
+const groupFor = (req, res) => {
+  const id = Number(req.params.id);
+  const g = Number.isInteger(id) ? db.prepare('SELECT id, name, created_by, created_at FROM group_chats WHERE id = ?').get(id) : null;
+  if (!g || !isMember(g.id, req.user.id)) { res.status(404).json({ error: 'group_not_found' }); return null; }
+  return g;
+};
+
+api.get('/groups', needUser, (req, res) => {
+  const groups = db
+    .prepare(
+      `SELECT g.id, g.name, g.created_at,
+         (SELECT COUNT(*) FROM group_members x WHERE x.group_id = g.id) AS member_count
+       FROM group_chats g JOIN group_members m ON m.group_id = g.id
+       WHERE m.user_id = ? ORDER BY g.created_at DESC`,
+    )
+    .all(req.user.id);
+  res.json({ groups });
+});
+
+// Create a group. The creator can only add people who are on their own friend list.
+api.post('/groups', needUser, socialLimiter, (req, res) => {
+  const name = cleanName(req.body?.name, 40);
+  const ids = [...new Set((Array.isArray(req.body?.memberIds) ? req.body.memberIds : []).map(Number))].filter((n) => Number.isInteger(n) && n !== req.user.id);
+  if (!name || !ids.length || ids.length + 1 > MAX_GROUP) return res.status(400).json({ error: 'invalid_group' });
+  const isFriend = db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?');
+  if (!ids.every((id) => isFriend.get(req.user.id, id))) return res.status(400).json({ error: 'not_a_friend' });
+  const now = Date.now();
+  let groupId;
+  db.exec('BEGIN');
+  try {
+    groupId = Number(db.prepare('INSERT INTO group_chats(name, created_by, created_at) VALUES (?,?,?)').run(name, req.user.id, now).lastInsertRowid);
+    const add = db.prepare('INSERT INTO group_members(group_id, user_id, joined_at) VALUES (?,?,?)');
+    for (const id of [req.user.id, ...ids]) add.run(groupId, id, now);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  const group = { id: groupId, name, created_at: now, member_count: ids.length + 1 };
+  for (const id of ids) emitTo(id, 'group:new', { group, by: req.user.display_name });
+  res.json({ group });
+});
+
+// Name, creation date and member list, for the group's info card.
+api.get('/groups/:id', needUser, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const members = db
+    .prepare(
+      `SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at, m.joined_at
+       FROM group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = ? ORDER BY m.joined_at, u.id`,
+    )
+    .all(g.id)
+    .map((u) => ({ ...u, is_creator: u.id === g.created_by }));
+  res.json({ group: g, members });
+});
+
+// Any member can rename the group.
+api.patch('/groups/:id', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const name = cleanName(req.body?.name, 40);
+  if (!name) return res.status(400).json({ error: 'invalid_group' });
+  db.prepare('UPDATE group_chats SET name = ? WHERE id = ?').run(name, g.id);
+  for (const id of memberIds(g.id)) emitTo(id, 'group:renamed', { group_id: g.id, name });
+  res.json({ ok: true, name });
+});
+
+api.get('/groups/:id/messages', needUser, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const messages = db
+    .prepare(
+      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at
+       FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? ORDER BY m.id DESC LIMIT 50`,
+    )
+    .all(g.id)
+    .reverse();
+  res.json({ messages });
+});
+
+api.post('/groups/:id/messages', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const body = cleanBody(req.body?.body, 2000);
+  if (!body) return res.status(400).json({ error: 'invalid_message' });
+  const now = Date.now();
+  const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at) VALUES (?,?,?,?)').run(g.id, req.user.id, body, now);
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now };
+  for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
+  res.json({ message });
 });

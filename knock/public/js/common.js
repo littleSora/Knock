@@ -85,6 +85,10 @@ const MESSAGES = {
   invalid_name: 'Enter a name.',
   invalid_theme: 'That theme isn’t valid.',
   image_too_large: 'That picture is too big. Try a smaller crop.',
+  invalid_group: 'Give the group a name and pick at least one friend.',
+  not_a_friend: 'You can only add people who are on your friend list.',
+  group_not_found: 'That group isn’t available any more.',
+  invalid_message: 'Type a message first.',
   invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG or WebP.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
