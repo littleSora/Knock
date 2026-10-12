@@ -1,0 +1,67 @@
+# Knock: video calls and messaging
+
+Guests join a call with a random code and a nickname. Signed-in people join calls under their display name (no nickname step) and also get a dashboard, friends with live presence, direct messages, and an Inbox/Spam split for notifications.
+"Knock" is a placeholder name; rename it in `views/*.html` and `server/auth.js`.
+
+## Run it (Windows PowerShell)
+
+Needs **Node.js 22.13 or newer** (`node -v`). No database to install: SQLite is built into Node.
+
+```powershell
+copy .env.example .env
+npm install
+npm start
+```
+
+Open http://localhost:3000. To test a call, open a second window in a private/incognito tab and join with the code.
+
+In development, with the `.env` keys left blank:
+- the CAPTCHA page shows a "Continue (dev mode)" button,
+- sign-in codes are printed in the terminal instead of being texted or emailed.
+
+Camera and mic need **HTTPS** on anything other than `localhost`.
+
+## Turning on the real services (all keys go in `.env`, never in the browser code)
+
+| Feature | Variables | Where to get it |
+|---|---|---|
+| Human check | `RECAPTCHA_SITE_KEY`, `RECAPTCHA_SECRET` | google.com/recaptcha/admin (type: v2 "I'm not a robot") |
+| Continue with Google | `GOOGLE_CLIENT_ID` | Google Cloud Console > Credentials > OAuth client ID (Web). Add your site as an authorized JavaScript origin |
+| Email (Gmail) codes | `SMTP_URL`, `MAIL_FROM` | Any SMTP server. For Gmail use an app password: `smtps://you%40gmail.com:APP_PASSWORD@smtp.gmail.com` |
+| Phone (SMS) codes | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | twilio.com |
+| Calls behind strict firewalls | `TURN_URL`, `TURN_SECRET` | Your own coturn server (`static-auth-secret`) |
+
+Production (`NODE_ENV=production`) refuses to start without `COOKIE_SECRET` (32+ chars) and both reCAPTCHA keys.
+Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so rate limits use real visitor IPs.
+
+## Where each requirement lives
+
+| Requirement | Implementation |
+|---|---|
+| Guest sessions with random ID | `POST /api/sessions` makes a 10-character code (about 1.1e15 possibilities, from a crypto RNG). `/s/<code>` is the room |
+| Nickname before entering (guests) | Lobby screen in `views/room.html`; the server also rejects a guest `room:join` without one. Signed-in people skip it and always use their display name (`server/realtime.js`) |
+| Landing + login (phone, Google, Gmail) | `/` and `/login`. Phone and email use one-time codes; Google uses a verified ID token (`server/auth.js`) |
+| Dashboard | `/dashboard`: calls yesterday (plus a 7-day strip), all of your scheduled calls (upcoming grouped by day, earlier ones tucked away, with a form to add them), and Smart recaps |
+| Notifications | Bell icon, top right. Inbox = friends' messages + "added you as a friend". Spam tab = people not on your list. Spam never raises the badge |
+| Smart recaps | During a call, the Recap tab lets anyone jot a decision or a follow-up with an owner (synced live, stored in `recap_items`). Everyone who was in the call sees it on their dashboard and can tick follow-ups off (`/api/recaps`) |
+| Profile card in a call | Tap anyone's avatar on their video tile: display name, name at signup, account creation date, and a Send friend request button (`/api/users/:handle`) |
+| Friends | Profile page `/u/<handle>` has the add-friend icon; the other person is notified. Friends panel: Unfriend on the left, green/gray dot on the right, online first |
+| CAPTCHA | reCAPTCHA gate at `/verify`. Every page, API route and WebSocket needs the signed "human" cookie it sets |
+| Hidden keys and endpoints | See below |
+
+## Security notes
+
+- Secrets live only in `.env` (git-ignored) and are used only by the server. The browser talks to same-origin `/api/*`; Google, Twilio and SMTP are called from the server.
+- Two identifiers are public by design and are sent to the browser only after the human check: the reCAPTCHA *site* key and the Google *client ID*. Restrict both to your domain in their consoles.
+- TURN passwords are generated per request and expire after an hour (`GET /api/ice`); the TURN secret never leaves the server.
+- Every API route is behind the human check, a rate limit and (where needed) a login. Sign-in codes are stored hashed, expire in 10 minutes and allow 5 attempts.
+- Login cookie: random token, `HttpOnly`, `SameSite=Lax`, `Secure` in production, only its hash is stored. Cross-site POSTs are rejected, WebSockets are same-origin only, and `helmet` sets a strict Content-Security-Policy.
+- Names and messages are rendered as text (never as HTML).
+
+## Behavior worth knowing
+
+- **Friend adds are one-way.** Adding someone puts them in *your* list and notifies them. Whether a message is spam depends on whether the *recipient* has the sender in their list. Presence is visible to anyone who has added you, so for a privacy-first product add an accept step.
+- Calls are peer-to-peer mesh, comfortable up to about 6 people (`MAX_PEOPLE` in `server/realtime.js`). Larger rooms need an SFU such as LiveKit.
+- A "call" for the dashboard is a session where you were present with at least one other person.
+- Run a single server process; presence and live rooms are kept in memory.
+- Not included yet: blocking/reporting, account deletion, email/SMS cost controls beyond rate limits.

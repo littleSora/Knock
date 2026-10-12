@@ -1,0 +1,39 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/css/app.css"><title>Log in · Knock</title></head>
+<body>
+<header id="topbar" class="topbar"></header>
+<main class="auth">
+  <section>
+    <h1>Log in or create an account</h1>
+    <p class="lede">The steps are the same either way. We create your account the first time you sign in.</p>
+  </section>
+  <section class="ticket">
+    <div class="tabs" role="tablist" aria-label="Sign-in method">
+      <button class="tab on" role="tab" data-tab="phone">Phone</button>
+      <button class="tab" role="tab" data-tab="email">Email</button>
+      <button class="tab" role="tab" data-tab="google">Google</button>
+    </div>
+    <form id="req">
+      <label id="targetLabel" for="target">Phone number</label>
+      <input id="target" autocomplete="tel" required>
+      <p id="targetHint" class="hint">Include your country code, like +63 for the Philippines.</p>
+      <button class="btn primary">Send code</button>
+    </form>
+    <form id="verify" hidden>
+      <label for="code">6-digit code</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+      <p id="sentTo" class="hint"></p>
+      <button class="btn primary">Verify and continue</button>
+      <button type="button" id="back" class="link-btn">Use something else</button>
+    </form>
+    <div id="googlePane" hidden>
+      <p>Continue with the Google account you use for Gmail.</p>
+      <div id="gbtn"></div>
+      <p id="gnote" class="hint"></p>
+    </div>
+    <p id="msg" class="error" role="alert"></p>
+    <p id="devHint" class="hint" hidden>Dev mode: the code is printed in the server console.</p>
+  </section>
+</main>
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="/assets/js/login.js"></script>
+</body></html>

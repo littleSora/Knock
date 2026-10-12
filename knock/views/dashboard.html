@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/css/app.css"><title>Dashboard · Knock</title></head>
+<body>
+<header id="topbar" class="topbar"></header>
+<main class="dash">
+  <h1 id="hello">Welcome back</h1>
+  <div class="dash-grid">
+    <div>
+      <section class="block" aria-labelledby="yh">
+        <h2 id="yh">Calls yesterday</h2>
+        <div class="yesterday"><p class="big" id="yCount">0</p><div class="bars" id="bars"></div></div>
+      </section>
+      <section class="block" aria-labelledby="th">
+        <h2 id="th">Your scheduled calls</h2>
+        <div id="schedule"></div>
+        <p id="schedEmpty" class="empty" hidden>Nothing scheduled yet. Use “Schedule a call” below.</p>
+        <details id="pastWrap" hidden>
+          <summary id="pastSummary"></summary>
+          <ul id="past" class="rows"></ul>
+        </details>
+        <details>
+          <summary>Schedule a call</summary>
+          <form id="sched" class="sched-form">
+            <input id="schedTitle" aria-label="Call title" placeholder="What’s the call about?" maxlength="80" required>
+            <input id="schedWhen" type="datetime-local" aria-label="Date and time" required>
+            <button class="btn">Add to schedule</button>
+          </form>
+        </details>
+      </section>
+    </div>
+    <aside>
+      <section class="block" aria-labelledby="rh">
+        <h2 id="rh">Call recaps</h2>
+        <p class="hint">After every call: what was decided and who owns each follow-up. Add them from the Recap tab during a call.</p>
+        <div id="recaps"></div>
+        <p id="recapsEmpty" class="empty" hidden>No recaps yet. They appear here after a call where someone adds a decision or follow-up.</p>
+        <button id="recapMore" class="link-btn" hidden></button>
+      </section>
+      <section class="block">
+        <h2>Your profile</h2>
+        <p class="hint">Friends find you with <strong id="handle"></strong></p>
+        <form id="nameForm"><label for="displayName">Display name</label><input id="displayName" maxlength="40" required><button class="btn sm">Save name</button></form>
+      </section>
+      <button id="instant" class="btn primary">Start an instant call</button>
+    </aside>
+  </div>
+</main>
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="/assets/js/dashboard.js"></script>
+</body></html>
