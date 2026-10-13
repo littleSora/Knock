@@ -1,10 +1,10 @@
-import { api, h, icon, errText, toast, avatarEl, openModal } from './common.js';
+import { api, h, icon, errText, toast, avatarEl, openModal, confirmDialog, friendActions } from './common.js';
 import { profileButton } from './account.js';
 
-const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], friendAdds: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, inCall: false, sessionId: null };
+const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null };
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtStamp = (ms) => `${fmtDate(ms)} at ${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-let bar, badgeEl, panels;
+let bar, badgeEl, chatBadgeEl, panels;
 
 // Search + friends + notifications, shared by the normal top bar and the in-call bar.
 function buildTools() {
@@ -26,10 +26,12 @@ function buildTools() {
   });
 
   badgeEl = h('span', { class: 'badge', hidden: true });
-  panels = { friends: h('div', { class: 'panel', hidden: true }), notif: h('div', { class: 'panel', hidden: true }) };
+  chatBadgeEl = h('span', { class: 'badge', hidden: true });
+  panels = { friends: h('div', { class: 'panel', hidden: true }), chats: h('div', { class: 'panel', hidden: true }), notif: h('div', { class: 'panel', hidden: true }) };
   const friendsBtn = h('button', { class: 'icon-btn', 'aria-label': 'Friends', onclick: () => togglePanel('friends') }, icon('users'));
+  const chatsBtn = h('button', { class: 'icon-btn', 'aria-label': 'Chats', title: 'Chats', onclick: () => togglePanel('chats') }, icon('messages'), chatBadgeEl);
   const bellBtn = h('button', { class: 'icon-btn', 'aria-label': 'Notifications', onclick: () => togglePanel('notif') }, icon('bell'), badgeEl);
-  return { search: h('div', { class: 'search' }, input, results), friendsBtn, bellBtn };
+  return { search: h('div', { class: 'search' }, input, results), friendsBtn, chatsBtn, bellBtn };
 }
 function wirePanels() {
   // Switching Inbox/Spam re-renders the panel, which detaches the clicked tab before this handler runs.
@@ -49,9 +51,9 @@ export function mountTopbar(user) {
     bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('a', { class: 'btn ghost sm', href: '/login' }, 'Log in'), h('a', { class: 'btn sm', href: '/login' }, 'Sign up')));
     return;
   }
-  const { search, friendsBtn, bellBtn } = buildTools();
+  const { search, friendsBtn, chatsBtn, bellBtn } = buildTools();
   const logout = h('button', { class: 'btn ghost sm', onclick: async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; } }, 'Log out');
-  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, search, friendsBtn, bellBtn, logout, profileButton(user), panels.friends, panels.notif));
+  bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, search, friendsBtn, chatsBtn, bellBtn, logout, profileButton(user), panels.friends, panels.chats, panels.notif));
   wirePanels();
 }
 
@@ -66,9 +68,9 @@ export function mountRoomTools(nav, user, sessionId) {
   S.inCall = true;
   S.sessionId = sessionId;
   document.body.classList.add('in-call');
-  const { search, friendsBtn, bellBtn } = buildTools();
+  const { search, friendsBtn, chatsBtn, bellBtn } = buildTools();
   const copy = nav.querySelector('#copy');
-  nav.replaceChildren(search, friendsBtn, bellBtn, copy, profileButton(user), panels.friends, panels.notif);
+  nav.replaceChildren(search, friendsBtn, chatsBtn, bellBtn, copy, profileButton(user), panels.friends, panels.chats, panels.notif);
   wirePanels();
 }
 
@@ -78,7 +80,8 @@ function togglePanel(name) {
   closePanels();
   if (!opening) return;
   panels[name].hidden = false;
-  if (name === 'friends') renderFriends();
+  if (name === 'chats') { renderChats(); refreshChats(); }
+  else if (name === 'friends') { renderFriends(); refreshFriends(); refreshGroups(); } // always show the server's current online/offline status
   else { renderNotif(); api('/api/notifications/read', { method: 'POST' }).then(refreshNotif); }
 }
 
@@ -93,16 +96,25 @@ function friendRow(f) {
     h('button', { class: 'row-main', onclick: () => openChat(f) }, h('span', { class: 'name' }, f.display_name), h('span', { class: 'sub' }, '@' + f.handle)),
     h('span', { class: 'dot ' + (f.online ? 'on' : 'off'), role: 'img', 'aria-label': f.online ? 'Online' : 'Offline' }));
 }
-const groupRow = (g) => h('li', { class: 'row' },
-  h('button', { class: 'row-main', onclick: () => openGroupChat(g) }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.member_count} members`)));
+const groupUnread = (id) => S.notif.groups.find((x) => x.id === id)?.unread || 0;
+const countText = (n) => (n > 9 ? '9+' : String(n));
+const groupRow = (g) => {
+  const n = groupUnread(g.id);
+  return h('li', { class: 'row' },
+    h('button', { class: 'row-main', onclick: () => openGroupChat(g) }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.member_count} members`)),
+    n ? h('span', { class: 'count-pill', role: 'img', 'aria-label': `${n} unread` }, countText(n)) : null);
+};
 function renderFriends() {
   if (!panels) return;
-  const group = (label, list) => list.length ? [h('h3', {}, `${label} (${list.length})`), h('ul', { class: 'rows' }, list.map(friendRow))] : [];
-  panels.friends.replaceChildren(
+  const section = (label, list, row) => (list.length ? [h('h3', {}, `${label} (${list.length})`), h('ul', { class: 'rows' }, list.map(row))] : []);
+  panels.friends.replaceChildren(...[
+    // Groups sit above Friends and are hidden entirely until you're in one.
+    ...(S.groups.length ? [h('h2', {}, 'Groups'), h('ul', { class: 'rows' }, S.groups.map(groupRow))] : []),
     h('h2', {}, 'Friends'),
-    S.friends.length ? null : h('p', { class: 'empty' }, 'No friends yet. Open someone’s profile and tap the add-friend icon.'),
-    S.groups.length ? [h('h3', {}, `Groups (${S.groups.length})`), h('ul', { class: 'rows' }, S.groups.map(groupRow))] : null,
-    ...group('Online', S.friends.filter((f) => f.online)), ...group('Offline', S.friends.filter((f) => !f.online)));
+    ...(S.friends.length ? [] : [h('p', { class: 'empty' }, 'No friends yet. Open someone’s profile and tap Add friend.')]),
+    ...section('Online', S.friends.filter((f) => f.online), friendRow),
+    ...section('Offline', S.friends.filter((f) => !f.online), friendRow),
+  ]);
 }
 async function unfriend(f) {
   if (!confirm(`Remove ${f.display_name} from your friends?`)) return;
@@ -112,29 +124,114 @@ async function unfriend(f) {
 }
 
 /* ---------- notifications: Inbox (friends) and Spam (everyone else) ---------- */
+const sumUnread = (list) => list.reduce((n, t) => n + t.unread, 0);
+// Recomputed locally too, so pressing an unread item clears it instantly instead of after a round trip.
+function paintBadge() {
+  const n = S.notif;
+  n.badge = sumUnread(n.inbox) + sumUnread(n.groups) + n.requests.filter((r) => !r.seen_at).length + n.accepted.filter((a) => !a.read_at).length;
+  n.spamUnread = sumUnread(n.spam);
+  badgeEl.textContent = n.badge > 9 ? '9+' : n.badge;
+  badgeEl.hidden = !n.badge;
+}
+async function markAllRead() {
+  try { await api('/api/notifications/read-all', { method: 'POST' }); } catch (e) { toast(errText(e)); }
+  refreshNotif();
+}
 async function refreshNotif() {
   S.notif = await api('/api/notifications');
-  badgeEl.textContent = S.notif.badge > 9 ? '9+' : S.notif.badge;
-  badgeEl.hidden = !S.notif.badge;
+  paintBadge();
+  refreshChats();
   if (!panels.notif.hidden) renderNotif();
+  if (!panels.friends.hidden) renderFriends();
 }
 const threadRow = (t) => h('li', { class: 'row' },
-  h('button', { class: 'row-main', onclick: () => openChat(t) }, h('span', { class: 'name' }, t.display_name), h('span', { class: 'sub' }, t.body)),
+  h('button', { class: 'row-main', onclick: () => { t.unread = 0; paintBadge(); openChat(t); } }, h('span', { class: 'name' }, t.display_name), h('span', { class: 'sub' }, t.body)),
   t.unread ? h('span', { class: 'dot new', role: 'img', 'aria-label': `${t.unread} unread` }) : null);
+// A friend request with Accept / Decline right in the bell.
+function requestRow(r) {
+  const act = async (verb, message) => {
+    try {
+      await api(`/api/friends/requests/${r.id}/${verb}`, { method: 'POST' });
+      if (message) toast(message);
+    } catch (e) { toast(errText(e)); }
+    refreshNotif();
+    refreshFriends();
+  };
+  return h('li', { class: 'row request-row' },
+    avatarEl(r, 34),
+    h('div', { class: 'row-main pick-text' },
+      h('a', { class: 'name', href: '/u/' + r.handle, ...newTab() }, r.display_name),
+      h('span', { class: 'sub' }, 'wants to be your friend'),
+      h('span', { class: 'request-btns' },
+        h('button', { class: 'btn primary sm', type: 'button', onclick: () => act('accept', `You and ${r.display_name} are now friends.`) }, 'Accept'),
+        h('button', { class: 'btn sm', type: 'button', onclick: () => act('decline') }, 'Decline'))),
+    r.seen_at ? null : h('span', { class: 'dot new', role: 'img', 'aria-label': 'New' }));
+}
 function renderNotif() {
   const n = S.notif;
   const tab = (id, label, count) => h('button', { class: 'tab' + (S.tab === id ? ' on' : ''), role: 'tab', 'aria-selected': String(S.tab === id), onclick: () => { S.tab = id; renderNotif(); } }, label, count ? h('span', { class: 'count' }, count) : null);
   let body;
   if (S.tab === 'inbox') {
-    const adds = n.friendAdds.map((a) => h('li', { class: 'row' },
-      h('a', { class: 'row-main', href: '/u/' + a.handle, ...newTab() }, h('span', { class: 'name' }, `${a.display_name} added you as a friend`), h('span', { class: 'sub' }, 'View profile')),
+    const requests = n.requests.map(requestRow);
+    const accepted = n.accepted.map((a) => h('li', { class: 'row' },
+      h('a', { class: 'row-main', href: '/u/' + a.handle, ...newTab() }, h('span', { class: 'name' }, `${a.display_name} accepted your friend request`), h('span', { class: 'sub' }, 'View profile')),
       a.read_at ? null : h('span', { class: 'dot new', role: 'img', 'aria-label': 'New' })));
-    const rows = [...adds, ...n.inbox.map(threadRow)];
-    body = rows.length ? h('ul', { class: 'rows' }, rows) : h('p', { class: 'empty' }, 'Nothing new. Messages from your friends show up here.');
+    const groups = n.groups.map((g) => h('li', { class: 'row' },
+      h('button', { class: 'row-main', onclick: () => { g.unread = 0; S.notif.groups = S.notif.groups.filter((x) => x !== g); paintBadge(); openGroupChat(g); } }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.from_name}: ${g.body}`)),
+      h('span', { class: 'count-pill', role: 'img', 'aria-label': `${g.unread} unread` }, countText(g.unread))));
+    const rows = [...requests, ...accepted, ...groups, ...n.inbox.filter((t) => t.unread > 0).map(threadRow)]; // read conversations live in Chats
+    body = rows.length ? h('ul', { class: 'rows' }, rows) : h('p', { class: 'empty' }, 'Nothing new. Unread messages and friend requests show up here; read conversations are under Chats.');
   } else {
     body = n.spam.length ? [h('p', { class: 'hint' }, 'Messages from people who aren’t on your friend list.'), h('ul', { class: 'rows' }, n.spam.map(threadRow))] : h('p', { class: 'empty' }, 'No spam. Messages from people you haven’t added land here.');
   }
-  panels.notif.replaceChildren(h('div', { class: 'tabs', role: 'tablist' }, tab('inbox', 'Inbox', n.badge), tab('spam', 'Spam', n.spamUnread)), body);
+  panels.notif.replaceChildren(...[
+    h('div', { class: 'tabs', role: 'tablist' }, tab('inbox', 'Inbox', n.badge), tab('spam', 'Spam', n.spamUnread)),
+    n.badge || n.spamUnread ? h('div', { class: 'panel-tools' }, h('button', { class: 'link-btn', type: 'button', onclick: markAllRead }, 'Mark all as read')) : null,
+    body,
+  ].flat().filter(Boolean)); // (replaceChildren would print null/arrays as text)
+}
+
+/* ---------- chats panel: all your conversations, newest first, plus a way to start a new one ---------- */
+async function refreshChats() {
+  try { S.chats = (await api('/api/chats')).chats; } catch { return; }
+  const unread = S.chats.reduce((n, c) => n + c.unread, 0);
+  chatBadgeEl.textContent = countText(unread);
+  chatBadgeEl.hidden = !unread;
+  if (!panels.chats.hidden) renderChats();
+}
+const shortWhen = (ms) => {
+  const d = new Date(ms);
+  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+};
+const previewOf = (c) => {
+  if (c.preview == null) return 'No messages yet';
+  const text = c.preview.startsWith(location.origin + '/s/') && !/\s/.test(c.preview) ? 'Call invite' : c.preview;
+  const who = c.type === 'group' ? (c.mine ? 'You: ' : `${c.from_name}: `) : c.mine ? 'You: ' : '';
+  return who + text;
+};
+function chatRow(c) {
+  const open = () => (c.type === 'group' ? openGroupChat({ id: c.id, name: c.name }) : openChat({ id: c.id, handle: c.handle, display_name: c.display_name, avatar_at: c.avatar_at }));
+  const title = c.type === 'group' ? c.name : c.display_name;
+  return h('li', { class: 'row' },
+    c.type === 'group' ? h('span', { class: 'pic', style: '--s:34px', 'aria-hidden': 'true' }, icon('users', 18)) : avatarEl(c, 34),
+    h('button', { class: 'row-main chat-row', onclick: open },
+      h('span', { class: 'name' }, title, c.type === 'group' ? h('span', { class: 'sub', style: 'margin-left:.4rem' }, `${c.member_count} members`) : null),
+      h('span', { class: 'sub' + (c.unread ? ' strong' : '') }, previewOf(c))),
+    h('span', { class: 'chat-meta' }, h('span', { class: 'sub' }, shortWhen(c.at)),
+      c.unread ? h('span', { class: 'count-pill', role: 'img', 'aria-label': `${c.unread} unread` }, countText(c.unread)) : null));
+}
+function renderChats() {
+  const withChat = new Set(S.chats.filter((c) => c.type === 'dm').map((c) => c.id));
+  const fresh = S.friends.filter((f) => !withChat.has(f.id)); // friends you haven't talked to yet
+  panels.chats.replaceChildren(...[
+    h('h2', {}, 'Chats'),
+    S.chats.length ? h('ul', { class: 'rows' }, S.chats.map(chatRow)) : h('p', { class: 'empty' }, 'No chats yet. Pick a friend below to say hi.'),
+    ...(fresh.length ? [h('h3', {}, 'Start a new chat'), h('ul', { class: 'rows' }, fresh.map((f) => h('li', { class: 'row' },
+      avatarEl(f, 34),
+      h('button', { class: 'row-main', onclick: () => openChat(f) }, h('span', { class: 'name' }, f.display_name), h('span', { class: 'sub' }, '@' + f.handle)),
+      h('span', { class: 'dot ' + (f.online ? 'on' : 'off'), role: 'img', 'aria-label': f.online ? 'Online' : 'Offline' }))))]
+      : S.friends.length ? [] : [h('p', { class: 'hint' }, 'Add a friend to start a conversation.')]),
+  ]);
 }
 
 /* ---------- direct-message dock ---------- */
@@ -154,8 +251,8 @@ function appendMsg(m) {
   list.append(S.chat.group ? groupMsgEl(m) : msgEl(m, S.chat.user));
   list.scrollTop = list.scrollHeight;
 }
-async function openChat(u) {
-  closePanels();
+async function openChat(u, { focus = true } = {}) {
+  if (focus) closePanels();
   const { messages } = await api('/api/messages/with/' + u.id);
   S.chat = { user: { id: u.id, display_name: u.display_name }, messages };
   document.getElementById('chat-dock')?.remove();
@@ -175,7 +272,7 @@ async function openChat(u) {
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: () => { S.chat = null; document.getElementById('chat-dock').remove(); } }, icon('x', 16))),
     list, form));
   list.scrollTop = list.scrollHeight;
-  input.focus();
+  if (focus) input.focus();
   refreshNotif();
 }
 async function inviteToCall(u) {
@@ -198,18 +295,25 @@ async function openProfileCard(u) {
   const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close profile', onclick: () => m.close() }, icon('x', 16));
   const m = openModal({ label: `${u.display_name}’s profile`, wide: true }, h('div', { class: 'pop-head' }, h('span', { class: 'grow' }), closeBtn), body);
   try {
-    const { user: p, isFriend } = await api('/api/users/' + encodeURIComponent(u.handle));
-    const groupBtn = h('button', { class: 'btn primary sm', type: 'button', 'data-autofocus': '', onclick: () => { m.close(); openGroupCreate({ id: p.id, handle: p.handle, display_name: p.display_name, avatar_at: p.avatar_at }); } },
-      h('span', { class: 'btn-ic' }, icon('users', 16)), `Create a group with ${p.display_name}`);
-    body.replaceChildren(
-      h('div', { class: 'profile-head', style: 'margin-top:0' }, avatarEl(p, 88), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle))),
-      h('dl', { class: 'facts-list' },
-        h('dt', {}, 'Username'), h('dd', {}, '@' + p.handle),
-        h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
-        h('dt', {}, 'Joined'), h('dd', {}, fmtDate(p.created_at)),
-        h('dt', {}, 'Friend'), h('dd', {}, isFriend ? 'Yes, in your friend list' : 'Not in your friend list')),
-      h('div', { class: 'pic-actions' }, groupBtn,
-        h('a', { class: 'link-btn', href: '/u/' + p.handle, ...newTab() }, 'Full profile')));
+    const { user: p, relation: first } = await api('/api/users/' + encodeURIComponent(u.handle));
+    const paint = (relation) => {
+      const groupBtn = h('button', { class: 'btn primary sm', type: 'button', onclick: () => { m.close(); openGroupCreate({ id: p.id, handle: p.handle, display_name: p.display_name, avatar_at: p.avatar_at }); } },
+        h('span', { class: 'btn-ic' }, icon('users', 16)), `Create a group with ${p.display_name}`);
+      body.replaceChildren(
+        h('div', { class: 'profile-head', style: 'margin-top:0' }, avatarEl(p, 88), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle))),
+        h('dl', { class: 'facts-list' },
+          h('dt', {}, 'Username'), h('dd', {}, '@' + p.handle),
+          h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
+          h('dt', {}, 'Joined'), h('dd', {}, fmtDate(p.created_at)),
+          h('dt', {}, 'Friend'), h('dd', {}, { friend: 'Yes, you’re friends', outgoing: 'Friend request sent', incoming: 'Wants to be your friend' }[relation] || 'Not friends yet')),
+        // Add friend / Request sent / Accept + Decline live here, so a chat with someone you're not friends with can fix that.
+        relation === 'self' ? null : friendActions(p, relation, (next) => { paint(next); refreshFriends(); refreshNotif(); }),
+        h('div', { class: 'pic-actions' },
+          relation === 'friend' ? groupBtn : null, // groups can only include friends
+          h('a', { class: 'link-btn', href: '/u/' + p.handle, ...newTab() }, 'Full profile')));
+      (body.querySelector('.friend-actions button, .pic-actions button') || closeBtn).setAttribute('data-autofocus', '');
+    };
+    paint(first);
   } catch (err) { body.replaceChildren(h('p', { class: 'error' }, errText(err))); }
 }
 
@@ -275,11 +379,12 @@ function openGroupCreate(first) {
 
 /* ---------- group chat dock ---------- */
 function groupMsgEl(m) {
+  if (m.kind === 'system') return h('div', { class: 'msg note' }, m.body);
   const mine = m.from_id === S.meId;
   return h('div', { class: 'msg' + (mine ? ' mine' : '') }, mine ? null : h('span', { class: 'who' }, m.from_name), m.body);
 }
-async function openGroupChat(g) {
-  closePanels();
+async function openGroupChat(g, { focus = true } = {}) {
+  if (focus) closePanels();
   let messages;
   try { ({ messages } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
   S.chat = { group: { id: g.id, name: g.name }, messages };
@@ -299,20 +404,31 @@ async function openGroupChat(g) {
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: () => { S.chat = null; document.getElementById('chat-dock').remove(); } }, icon('x', 16))),
     list, form));
   list.scrollTop = list.scrollHeight;
-  input.focus();
+  if (focus) input.focus();
+  refreshNotif(); // opening the chat marked it read, so its badge clears
 }
 
-// Group info card: name, when it was created, who is in it, and a way to rename it.
+// Group info card: name, when it was created, who is in it, rename, add people, remove people (creator) and leave.
 async function openGroupInfo(g) {
   const body = h('div', {}, h('p', { class: 'hint' }, 'Loading…'));
   const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close group info', onclick: () => m.close() }, icon('x', 16));
-  const m = openModal({ label: 'Group info', wide: true }, h('div', { class: 'pop-head' }, h('strong', {}, 'Group info'), h('span', { class: 'grow' }), closeBtn), body);
+  const m = openModal({ label: 'Group info', wide: true, onClose: () => { if (S.groupInfo?.modal === m) S.groupInfo = null; } },
+    h('div', { class: 'pop-head' }, h('strong', {}, 'Group info'), h('span', { class: 'grow' }), closeBtn), body);
   let data;
-  try { data = await api('/api/groups/' + g.id); } catch (err) { body.replaceChildren(h('p', { class: 'error' }, errText(err))); return; }
+  let view = 'info'; // 'info' | 'add'
+  const load = async () => {
+    try { data = await api('/api/groups/' + g.id); } catch (err) { body.replaceChildren(h('p', { class: 'error' }, errText(err))); return false; }
+    return true;
+  };
+  S.groupInfo = { id: g.id, modal: m, reload: async () => { if (await load()) render(); } }; // live refresh when someone joins or leaves
+  if (!(await load())) return;
   render();
 
-  function render() {
+  function render() { (view === 'add' ? renderAdd : renderInfo)(); }
+
+  function renderInfo() {
     const { group, members } = data;
+    const iAmCreator = group.created_by === S.meId;
     const msg = h('p', { class: 'error', role: 'alert' });
     const nameInput = h('input', { id: 'grpRename', maxlength: '40', required: true, autocomplete: 'off', value: group.name });
     const form = h('form', {}, h('label', { for: 'grpRename' }, 'Group name'), nameInput, h('button', { class: 'btn sm', type: 'submit' }, 'Save name'));
@@ -328,6 +444,18 @@ async function openGroupInfo(g) {
         render();
       } catch (err) { msg.textContent = errText(err); }
     });
+    const removeMember = async (u) => {
+      const ok = await confirmDialog({ title: `Remove ${u.display_name}?`, body: 'They will no longer see this group or its new messages.', confirmText: 'Remove' });
+      if (!ok) return;
+      try { await api(`/api/groups/${group.id}/members/${u.id}`, { method: 'DELETE' }); await load(); refreshGroups(); render(); toast(`${u.display_name} was removed`); }
+      catch (err) { msg.textContent = errText(err); }
+    };
+    const leave = async () => {
+      const ok = await confirmDialog({ title: `Leave “${group.name}”?`, body: 'You’ll stop getting its messages. Someone in the group will have to add you back to rejoin.', confirmText: 'Leave group' });
+      if (!ok) return;
+      try { await api(`/api/groups/${group.id}/members/${S.meId}`, { method: 'DELETE' }); m.close(); dropGroup(group.id); toast(`You left “${group.name}”`); }
+      catch (err) { msg.textContent = errText(err); }
+    };
     body.replaceChildren(
       h('h2', { style: 'font-size:1.6rem;margin-top:.2rem' }, group.name),
       h('p', { class: 'sub' }, `Created ${fmtStamp(group.created_at)}`),
@@ -335,9 +463,42 @@ async function openGroupInfo(g) {
       h('ul', { class: 'rows' }, members.map((u) => h('li', { class: 'row' },
         avatarEl(u, 34),
         h('div', { class: 'row-main pick-text' }, h('span', { class: 'name' }, u.id === S.meId ? `${u.display_name} (you)` : u.display_name), h('span', { class: 'sub' }, '@' + u.handle)),
-        u.is_creator ? h('span', { class: 'member-tag' }, 'Creator') : null))),
-      h('h3', {}, 'Change group name'), form, msg);
+        u.is_creator ? h('span', { class: 'member-tag' }, 'Creator') : null,
+        iAmCreator && u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Remove ${u.display_name}`, onclick: () => removeMember(u) }, 'Remove') : null))),
+      h('button', { class: 'btn sm', type: 'button', onclick: () => { view = 'add'; refreshFriends().then(() => view === 'add' && render()); render(); } }, h('span', { class: 'btn-ic' }, icon('userPlus', 16)), 'Add people'),
+      h('h3', {}, 'Change group name'), form, msg,
+      h('div', { class: 'dialog-actions' }, h('button', { class: 'btn danger', type: 'button', onclick: leave }, 'Leave group')));
   }
+
+  function renderAdd() {
+    const inGroup = new Set(data.members.map((u) => u.id));
+    const available = S.friends.filter((f) => !inGroup.has(f.id));
+    const msg = h('p', { class: 'error', role: 'alert' });
+    const add = async (f) => {
+      msg.textContent = '';
+      try { await api(`/api/groups/${g.id}/members`, { method: 'POST', body: { memberIds: [f.id] } }); await load(); refreshGroups(); toast(`${f.display_name} was added`); render(); }
+      catch (err) { msg.textContent = errText(err); }
+    };
+    let list;
+    if (!S.friends.length) list = h('p', { class: 'empty' }, 'You don’t have any friends yet. Friends can be added once they accept your request.');
+    else if (!available.length) list = h('p', { class: 'empty' }, 'Everyone on your friend list is already in this group.');
+    else list = h('ul', { class: 'rows' }, available.map((f) => h('li', { class: 'row' },
+      h('div', { class: 'row-main pick-row' }, avatarEl(f, 34), h('span', { class: 'pick-text' }, h('span', { class: 'name' }, f.display_name), h('span', { class: 'sub' }, '@' + f.handle))),
+      h('button', { class: 'btn primary sm', type: 'button', onclick: () => add(f) }, 'Add'))));
+    body.replaceChildren(
+      h('h3', { style: 'margin-top:0' }, 'Add people to the group'),
+      h('p', { class: 'hint' }, 'You can add your friends. They won’t see messages from before they joined.'),
+      list, msg,
+      h('div', { class: 'dialog-actions' }, h('button', { class: 'btn', type: 'button', 'data-autofocus': '', onclick: () => { view = 'info'; render(); } }, 'Back')));
+  }
+}
+// You're no longer in this group (you left, were removed, or it was deleted): tidy up everywhere it showed.
+function dropGroup(id) {
+  S.groups = S.groups.filter((x) => x.id !== id);
+  if (S.chat?.group?.id === id) { S.chat = null; document.getElementById('chat-dock')?.remove(); }
+  if (S.groupInfo?.id === id) S.groupInfo.modal.close();
+  renderFriends();
+  refreshNotif();
 }
 function applyGroupName(id, name) {
   const g = S.groups.find((x) => x.id === id);
@@ -355,21 +516,40 @@ function applyGroupName(id, name) {
 function connect() {
   const socket = window.io();
   socket.on('connect', () => { refreshFriends(); refreshGroups(); refreshNotif(); });
+  socket.on('dm:echo', () => refreshChats());
   socket.on('presence', ({ id, online }) => {
     const f = S.friends.find((x) => x.id === id);
     if (f) { f.online = online; sortFriends(); renderFriends(); }
   });
+  // A new message opens its chat box by itself, unless you're already in another chat (we never swap it out
+  // from under you while you type) or it's from someone who isn't your friend (that goes to Spam).
   socket.on('dm:new', (m) => {
     if (S.chat?.user?.id === m.from_id) { appendMsg(m); api('/api/messages/with/' + m.from_id).finally(refreshNotif); }
+    else if (!S.chat && !m.spam) openChat({ ...m.from, id: m.from_id }, { focus: false });
     else refreshNotif();
   });
   socket.on('dm:echo', (m) => { if (S.chat?.user?.id === m.to_id) appendMsg(m); });
-  socket.on('group:new', ({ group, by }) => { if (!S.groups.some((g) => g.id === group.id)) S.groups.unshift(group); renderFriends(); toast(`${by} added you to the group “${group.name}”`); });
+  // Friend requests: someone asked, answered, cancelled, or you unfriended. Refresh the lists and the bell.
+  socket.on('friends:changed', () => { refreshFriends(); refreshNotif(); });
+  socket.on('group:new', ({ group, by }) => { if (!S.groups.some((g) => g.id === group.id)) S.groups.unshift(group); renderFriends(); refreshNotif(); toast(`${by} added you to the group “${group.name}”`); });
   socket.on('group:msg', ({ group_id: gid, group_name: gname, message }) => {
-    if (S.chat?.group?.id === gid) appendMsg(message);
-    else if (message.from_id !== S.meId) toast(`${message.from_name} in ${gname}: ${message.body.slice(0, 60)}`);
+    const open = S.chat?.group?.id === gid;
+    refreshChats(); // the Chats list shows the newest message and order
+    if (open) appendMsg(message);
+    if (message.kind === 'system') return; // "Sam left" notes never alert
+    if (open) { if (message.from_id !== S.meId) api(`/api/groups/${gid}/read`, { method: 'POST' }).finally(refreshNotif); }
+    else if (message.from_id !== S.meId) {
+      if (!S.chat) openGroupChat(S.groups.find((x) => x.id === gid) || { id: gid, name: gname }, { focus: false });
+      else { refreshNotif(); toast(`${message.from_name} in ${gname}: ${message.body.slice(0, 60)}`); }
+    }
   });
   socket.on('group:renamed', ({ group_id: gid, name }) => applyGroupName(gid, name));
+  socket.on('group:members', ({ group_id: gid }) => { refreshGroups(); if (S.groupInfo?.id === gid) S.groupInfo.reload(); });
+  socket.on('group:removed', ({ group_id: gid, group_name: gname, left }) => {
+    if (!S.groups.some((g) => g.id === gid)) return; // already handled in this tab
+    dropGroup(gid);
+    if (!left) toast(`You were removed from “${gname}”`);
+  });
   socket.on('notif:new', () => refreshNotif());
   socket.on('connect_error', (e) => { if (e.message === 'captcha_required') location.href = '/verify?next=' + encodeURIComponent(location.pathname); });
 }

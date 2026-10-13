@@ -281,3 +281,20 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .pick-row { flex-direction: row; align-items: center; gap: 0.7rem; }
 .pick-text { display: flex; flex-direction: column; min-width: 0; align-items: flex-start; }
 .member-tag { font-size: 0.78rem; font-weight: 700; padding: 0.05rem 0.5rem; border: 2px solid var(--ink); border-radius: 999px; background: var(--yellow); color: var(--on-yellow); }
+
+/* ---------- friend requests + group unread ---------- */
+.count-pill { flex: none; min-width: 1.35rem; padding: 0 0.4rem; background: var(--pink); color: var(--on-pink); border-radius: 999px; font: 600 0.78rem/1.35rem var(--body); text-align: center; }
+.friend-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.friend-actions .btn { margin: 0; display: inline-flex; align-items: center; gap: 0.4rem; }
+.friend-state { display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; font-size: 0.92rem; }
+.request-row { align-items: flex-start; }
+.request-row .name { color: inherit; font-weight: 600; text-decoration: none; }
+.request-btns { display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+.request-btns .btn { margin: 0; }
+.btn.danger { color: var(--danger); border-color: var(--danger); }
+
+.panel-tools { display: flex; justify-content: flex-end; margin: 0.4rem 0 0.2rem; }
+
+.chat-row .sub { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-row .sub.strong { font-weight: 700; color: var(--ink); }
+.chat-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem; }

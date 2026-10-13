@@ -14,6 +14,14 @@ const rooms = new Map(); // sessionId -> Map(socket id -> { nickname, userId })
 
 export const isOnline = (userId) => online.has(userId);
 export const roomCount = (sessionId) => rooms.get(sessionId)?.size ?? 0;
+// Disconnects a person's live connections (the ones whose login cookie matches), so logging out or signing out other
+// devices also makes them go offline instead of staying "online" on a page that is no longer signed in.
+export function dropSockets(userId, shouldDrop) {
+  for (const sid of [...(online.get(userId) ?? [])]) {
+    const s = io?.sockets.sockets.get(sid);
+    if (s && shouldDrop(s.data.cookies?.sid)) s.disconnect(true);
+  }
+}
 export const emitTo = (userId, event, data) => io?.to(`u:${userId}`).emit(event, data);
 
 const MAX_RECAP_ITEMS = 100; // per call, so a room can't be used to fill the database
@@ -180,6 +188,9 @@ function onConnect(socket) {
 export function attachRealtime(server) {
   io = new Server(server, {
     maxHttpBufferSize: 1e5,
+    // Notice a vanished browser (closed laptop, dead wifi) in about 15 seconds instead of the 45 default, so "online" stays honest.
+    pingInterval: 8000,
+    pingTimeout: 7000,
     // Same-origin only: reject WebSocket/polling requests that come from another website.
     allowRequest: (req, cb) => {
       const origin = req.headers.origin;

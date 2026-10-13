@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS otps (
   expires_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0
 );
--- One-way: a row means user_id has friend_id in their own friend list.
+-- Mutual: a friendship is two rows (A->B and B->A), written together when a request is accepted.
 CREATE TABLE IF NOT EXISTS friends (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   friend_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS friends (
   PRIMARY KEY (user_id, friend_id)
 );
 CREATE INDEX IF NOT EXISTS friends_by_friend ON friends(friend_id);
+-- A pending friend request. Declining keeps the row (declined_at) so the sender can't simply re-send it every minute.
+CREATE TABLE IF NOT EXISTS friend_requests (
+  from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  seen_at INTEGER,
+  declined_at INTEGER,
+  PRIMARY KEY (from_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS friend_requests_by_to ON friend_requests(to_id);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY,
   from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -89,7 +99,7 @@ CREATE TABLE IF NOT EXISTS recap_items (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recap_by_session ON recap_items(session_id);
--- Group chats: created from a friend's profile card. Members are always friends of the creator at creation time.
+-- Group chats: created from a friend's profile card. Members are always friends of whoever added them.
 CREATE TABLE IF NOT EXISTS group_chats (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -134,6 +144,45 @@ if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'signup
 // Saved look of the app (JSON, validated by public/js/theme-core.js). NULL = default.
 if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'theme')) {
   db.exec('ALTER TABLE users ADD COLUMN theme TEXT');
+}
+
+// Group unread badges: each member remembers the last message they have read.
+if (!db.prepare('PRAGMA table_info(group_members)').all().some((c) => c.name === 'last_read_id')) {
+  db.exec('ALTER TABLE group_members ADD COLUMN last_read_id INTEGER NOT NULL DEFAULT 0');
+  // Existing history counts as read, so nobody wakes up to a wall of badges after upgrading.
+  db.exec('UPDATE group_members SET last_read_id = COALESCE((SELECT MAX(id) FROM group_messages x WHERE x.group_id = group_members.group_id), 0)');
+}
+// 'system' rows are the little notes in a group chat ("Sam left", "Ana added Ben"). They never count as unread.
+if (!db.prepare('PRAGMA table_info(group_messages)').all().some((c) => c.name === 'kind')) {
+  db.exec("ALTER TABLE group_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'msg'");
+}
+
+// One-time move from one-way friend adds to mutual friendships (PRAGMA user_version tracks it).
+// A pair that already added each other stays friends. A one-way add becomes a pending request from the person who
+// added, so the other person decides; until they accept, neither can see the other's online status.
+if (db.prepare('PRAGMA user_version').get().user_version < 1) {
+  db.exec('BEGIN');
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO friend_requests(from_id, to_id, created_at, seen_at)
+       SELECT f.user_id, f.friend_id, f.created_at, ? FROM friends f
+       WHERE NOT EXISTS (SELECT 1 FROM friends r WHERE r.user_id = f.friend_id AND r.friend_id = f.user_id)`,
+    ).run(Date.now());
+    db.exec('DELETE FROM friends WHERE NOT EXISTS (SELECT 1 FROM friends r WHERE r.user_id = friends.friend_id AND r.friend_id = friends.user_id)');
+    db.exec("DELETE FROM notifications WHERE type = 'friend_add'"); // replaced by real requests
+    db.exec('PRAGMA user_version = 1');
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+// v2: collapse duplicate "accepted your friend request" notices from before they were de-duplicated (keep the newest per pair).
+if (db.prepare('PRAGMA user_version').get().user_version < 2) {
+  db.exec(`DELETE FROM notifications WHERE type = 'friend_accepted' AND id NOT IN (
+    SELECT MAX(id) FROM notifications WHERE type = 'friend_accepted' GROUP BY user_id, from_id)`);
+  db.exec('PRAGMA user_version = 2');
 }
 
 export function createSession(ownerId = null) {

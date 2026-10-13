@@ -5,6 +5,7 @@ import { OAuth2Client } from 'google-auth-library';
 import crypto from 'node:crypto';
 import { db } from './db.js';
 import { cfg, isProd } from './env.js';
+import { dropSockets } from './realtime.js';
 import { randomToken, sha256, hmac, safeEqual } from './util.js';
 
 const SESSION_MS = 30 * 24 * 3600 * 1000;
@@ -178,6 +179,7 @@ auth.post('/google', authLimiter, async (req, res) => {
 });
 
 auth.post('/logout', (req, res) => {
+  if (req.user) dropSockets(req.user.id, (sid) => sid === req.cookies.sid);
   if (req.cookies.sid) db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(sha256(req.cookies.sid));
   res.clearCookie('sid', { path: '/' });
   res.json({ ok: true });
@@ -228,5 +230,6 @@ auth.delete('/contact/:channel', requireUser, (req, res) => {
 // "Sign out of other devices": ends every login for this account except the one making the request.
 auth.post('/signout-others', requireUser, (req, res) => {
   const info = db.prepare('DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?').run(req.user.id, sha256(req.cookies.sid));
+  dropSockets(req.user.id, (sid) => sid !== req.cookies.sid);
   res.json({ ok: true, signedOut: Number(info.changes) });
 });

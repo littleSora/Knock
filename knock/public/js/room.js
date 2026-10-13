@@ -1,4 +1,4 @@
-import { api, h, icon, renderCode, toast, errText, avatarEl, confirmDialog, flash } from './common.js';
+import { api, h, icon, renderCode, toast, errText, avatarEl, confirmDialog, flash, friendActions } from './common.js';
 import { profileButton } from './account.js';
 import { mountRoomTools } from './topbar.js';
 
@@ -344,20 +344,14 @@ async function openProfile({ name, handle, mine, avatarAt = null }) {
   if (!user) { body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Log in to see profiles and send friend requests.'), h('a', { class: 'btn primary', href: '/login?next=' + encodeURIComponent(location.pathname) }, 'Log in')); return; }
   body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Loading…'));
   try {
-    const { user: p, isSelf, isFriend } = await api('/api/users/' + encodeURIComponent(handle));
+    const { user: p, relation } = await api('/api/users/' + encodeURIComponent(handle));
     const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
-    let sent = isFriend;
-    const req = h('button', { class: 'btn primary', type: 'button', disabled: sent }, sent ? 'Friend request sent' : 'Send friend request');
-    req.addEventListener('click', async () => {
-      try { await api('/api/friends/' + p.id, { method: 'POST' }); sent = true; req.disabled = true; req.textContent = 'Friend request sent'; toast(`Friend request sent to ${p.display_name}.`); }
-      catch (err) { toast(errText(err)); }
-    });
     body.replaceChildren(
       head(p.display_name, '@' + p.handle, p.avatar_at),
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Display name'), h('dd', {}, p.display_name),
         h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
         h('dt', {}, 'Account created'), h('dd', {}, fmtDate(p.created_at))),
-      isSelf || mine ? h('p', { class: 'hint' }, 'This is how other people see you.') : req);
+      relation === 'self' || mine ? h('p', { class: 'hint' }, 'This is how other people see you.') : friendActions(p, relation));
   } catch { body.replaceChildren(head(name), h('p', { class: 'error' }, 'Couldn’t load this profile. Try again.')); }
 }

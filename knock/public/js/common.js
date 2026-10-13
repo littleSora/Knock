@@ -33,6 +33,7 @@ const ICONS = {
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/>',
+  messages: '<path d="M3 4h12v9H8l-5 3Z"/><path d="M15 8h6v9l-3-2h-6v-2"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/>',
 };
 export function icon(name, size = 20) {
@@ -90,6 +91,10 @@ const MESSAGES = {
   group_not_found: 'That group isn’t available any more.',
   invalid_message: 'Type a message first.',
   invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG or WebP.',
+  group_full: 'That group is full.',
+  not_group_creator: 'Only the person who created the group can remove people.',
+  member_not_found: 'That person isn’t in the group any more.',
+  request_not_found: 'That friend request is no longer there.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
 
@@ -114,6 +119,40 @@ export function avatarEl({ handle, display_name: name, avatar_at: at } = {}, siz
     img.addEventListener('load', () => el.replaceChildren(img)); // keep the letter until the picture has loaded
   }
   return el;
+}
+
+/* ---------- friend requests: one set of buttons for every place a person's profile shows up ---------- */
+// relation: 'none' | 'outgoing' (you asked) | 'incoming' (they asked you) | 'friend'
+export function friendActions(p, relation, onChange) {
+  const box = h('div', { class: 'friend-actions' });
+  const go = async (call, next, message) => {
+    try {
+      const res = await call();
+      relation = typeof next === 'function' ? next(res) : next;
+      paint();
+      if (message) toast(typeof message === 'function' ? message(relation) : message);
+      onChange?.(relation);
+    } catch (err) { toast(errText(err)); }
+  };
+  function paint() {
+    const id = encodeURIComponent(p.id);
+    if (relation === 'friend') {
+      box.replaceChildren(h('span', { class: 'friend-state' }, icon('userCheck', 18), 'Friends'));
+    } else if (relation === 'outgoing') {
+      box.replaceChildren(h('span', { class: 'friend-state' }, 'Request sent'),
+        h('button', { class: 'btn sm', type: 'button', onclick: () => go(() => api(`/api/friends/requests/${id}`, { method: 'DELETE' }), 'none', 'Friend request cancelled.') }, 'Cancel'));
+    } else if (relation === 'incoming') {
+      box.replaceChildren(h('span', { class: 'friend-state' }, `${p.display_name} wants to be your friend`),
+        h('button', { class: 'btn primary sm', type: 'button', onclick: () => go(() => api(`/api/friends/requests/${id}/accept`, { method: 'POST' }), 'friend', `You and ${p.display_name} are now friends.`) }, 'Accept'),
+        h('button', { class: 'btn sm', type: 'button', onclick: () => go(() => api(`/api/friends/requests/${id}/decline`, { method: 'POST' }), 'none') }, 'Decline'));
+    } else {
+      box.replaceChildren(h('button', { class: 'btn primary sm', type: 'button',
+        onclick: () => go(() => api(`/api/friends/${id}`, { method: 'POST' }), (r) => (r.state === 'friend' ? 'friend' : 'outgoing'), (r) => (r === 'friend' ? `You and ${p.display_name} are now friends.` : `Friend request sent to ${p.display_name}.`)) },
+      h('span', { class: 'btn-ic' }, icon('userPlus', 16)), 'Add friend'));
+    }
+  }
+  paint();
+  return box;
 }
 
 /* ---------- modal dialogs (one shared Escape / Tab-trap handler; the top-most dialog wins) ---------- */

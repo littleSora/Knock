@@ -1,4 +1,4 @@
-import { api, h, icon, errText, toast, avatarEl } from './common.js';
+import { api, h, errText, toast, avatarEl, friendActions } from './common.js';
 import { mountTopbar } from './topbar.js';
 
 const { user } = await api('/api/auth/me');
@@ -10,15 +10,7 @@ if (!user) {
 } else {
   const handle = decodeURIComponent(location.pathname.split('/').pop());
   try {
-    const { user: p, isSelf, isFriend } = await api('/api/users/' + encodeURIComponent(handle));
-    let friend = isFriend;
-    const friendBtn = h('button', { class: 'icon-btn', 'aria-label': 'Add friend', title: 'Add friend', 'aria-pressed': String(friend) }, icon(friend ? 'userCheck' : 'userPlus', 22));
-    const paint = () => { friendBtn.replaceChildren(icon(friend ? 'userCheck' : 'userPlus', 22)); friendBtn.setAttribute('aria-pressed', String(friend)); friendBtn.setAttribute('aria-label', friend ? 'Friend added' : 'Add friend'); friendBtn.title = friendBtn.getAttribute('aria-label'); };
-    friendBtn.addEventListener('click', async () => {
-      if (friend) return toast('Already in your friend list. Use Unfriend in the friends panel to remove them.');
-      try { await api('/api/friends/' + p.id, { method: 'POST' }); friend = true; paint(); toast(`${p.display_name} was notified that you added them.`); }
-      catch (err) { toast(errText(err)); }
-    });
+    const { user: p, isSelf, relation } = await api('/api/users/' + encodeURIComponent(handle));
 
     const box = h('textarea', { rows: '3', maxlength: '2000', 'aria-label': `Message ${p.display_name}`, placeholder: `Message ${p.display_name}` });
     const form = h('form', { onsubmit: async (e) => {
@@ -26,11 +18,11 @@ if (!user) {
       if (!box.value.trim()) return;
       try { await api('/api/messages', { method: 'POST', body: { toId: p.id, body: box.value } }); box.value = ''; toast('Message sent'); }
       catch (err) { toast(errText(err)); }
-    } }, box, h('p', { class: 'hint' }, 'If they haven’t added you as a friend, your message lands in their Spam tab.'), h('button', { class: 'btn primary' }, 'Send message'));
+    } }, box, h('p', { class: 'hint' }, 'Until you’re friends, your message lands in their Spam tab.'), h('button', { class: 'btn primary' }, 'Send message'));
 
     view.replaceChildren(
       h('div', { class: 'profile-head' }, avatarEl(p, 80),
-        h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle)), h('span', { class: 'grow' }), isSelf ? null : friendBtn),
+        h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle)), h('span', { class: 'grow' }), isSelf ? null : friendActions(p, relation)),
       isSelf ? h('p', { class: 'lede' }, 'This is how other people see you.') : form);
     document.title = `${p.display_name} · Knock`;
   } catch {

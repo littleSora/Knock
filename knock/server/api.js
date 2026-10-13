@@ -203,11 +203,50 @@ api.get('/users/:handle', needUser, (req, res) => {
     .prepare('SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, created_at, (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at FROM users WHERE handle = ?')
     .get(String(req.params.handle).toLowerCase());
   if (!user) return res.status(404).json({ error: 'user_not_found' });
-  const isFriend = !!db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(req.user.id, user.id);
-  res.json({ user, isSelf: user.id === req.user.id, isFriend });
+  const relation = relationTo(req.user.id, user.id);
+  res.json({ user, isSelf: relation === 'self', isFriend: relation === 'friend', relation });
 });
 
-/* ---------- friends ---------- */
+/* ---------- friends: mutual, through requests ---------- */
+// A friendship is two rows in `friends`, written when a request is accepted. That keeps everything that reads the
+// table (spam filter, online status, group invites) working on "both people agreed". Until then nobody sees presence.
+const areFriends = (a, b) => !!db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(a, b);
+const REREQUEST_AFTER = 7 * DAY; // after a decline, the same person can ask again once this has passed
+function relationTo(me, other) {
+  if (me === other) return 'self';
+  if (areFriends(me, other)) return 'friend';
+  if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?').get(me, other)) return 'outgoing'; // also shown if they declined, so a decline stays private
+  if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ? AND declined_at IS NULL').get(other, me)) return 'incoming';
+  return 'none';
+}
+function makeFriends(a, b) {
+  const now = Date.now();
+  db.exec('BEGIN');
+  try {
+    const add = db.prepare('INSERT OR IGNORE INTO friends(user_id, friend_id, created_at) VALUES (?,?,?)');
+    add.run(a, b, now);
+    add.run(b, a, now);
+    db.prepare('DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)').run(a, b, b, a);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+// Tell the person who sent a request that it was accepted (bell + live refresh), and refresh both friend lists.
+function announceFriendship(accepterId, requesterId) {
+  // One notice per pair: an earlier one (from a previous unfriend/re-friend) is replaced, not stacked.
+  db.prepare("DELETE FROM notifications WHERE type = 'friend_accepted' AND user_id = ? AND from_id = ?").run(requesterId, accepterId);
+  db.prepare("INSERT INTO notifications(user_id, type, from_id, created_at) VALUES (?, 'friend_accepted', ?, ?)").run(requesterId, accepterId, Date.now());
+  emitTo(requesterId, 'notif:new', { type: 'friend_accepted' });
+  emitTo(requesterId, 'friends:changed', {});
+  emitTo(accepterId, 'friends:changed', {});
+}
+const targetUserId = (req) => {
+  const id = Number(req.params.id);
+  return Number.isInteger(id) && id !== req.user.id && db.prepare('SELECT 1 FROM users WHERE id = ?').get(id) ? id : null;
+};
+
 api.get('/friends', needUser, (req, res) => {
   const rows = db
     .prepare('SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = ?')
@@ -217,25 +256,70 @@ api.get('/friends', needUser, (req, res) => {
   res.json({ friends: rows });
 });
 
+// Send a friend request. If they already asked you, this simply accepts theirs.
 api.post('/friends/:id', needUser, socialLimiter, (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id === req.user.id || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) {
-    return res.status(400).json({ error: 'invalid_user' });
+  const me = req.user.id;
+  const id = targetUserId(req);
+  if (id == null) return res.status(400).json({ error: 'invalid_user' });
+  if (areFriends(me, id)) return res.json({ ok: true, state: 'friend' });
+  if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?').get(id, me)) {
+    makeFriends(me, id);
+    announceFriendship(me, id);
+    return res.json({ ok: true, state: 'friend' });
   }
-  const added = db.prepare('INSERT OR IGNORE INTO friends VALUES (?, ?, ?)').run(req.user.id, id, Date.now()).changes;
-  // Notify the other person (at most once per day per sender, so add/unfriend loops can't spam them).
-  const recent = db
-    .prepare("SELECT 1 FROM notifications WHERE user_id = ? AND from_id = ? AND type = 'friend_add' AND created_at > ?")
-    .get(id, req.user.id, Date.now() - DAY);
-  if (added && !recent) {
-    db.prepare("INSERT INTO notifications(user_id, type, from_id, created_at) VALUES (?, 'friend_add', ?, ?)").run(id, req.user.id, Date.now());
-    emitTo(id, 'notif:new', { type: 'friend_add' });
+  const now = Date.now();
+  const existing = db.prepare('SELECT declined_at FROM friend_requests WHERE from_id = ? AND to_id = ?').get(me, id);
+  let notify = false;
+  if (!existing) {
+    db.prepare('INSERT INTO friend_requests(from_id, to_id, created_at) VALUES (?,?,?)').run(me, id, now);
+    notify = true;
+  } else if (existing.declined_at && now - existing.declined_at > REREQUEST_AFTER) {
+    db.prepare('UPDATE friend_requests SET created_at = ?, seen_at = NULL, declined_at = NULL WHERE from_id = ? AND to_id = ?').run(now, me, id);
+    notify = true;
+  } // else: still pending, or declined recently. Quietly nothing, so the other person isn't pestered.
+  if (notify) emitTo(id, 'notif:new', { type: 'friend_request' });
+  res.json({ ok: true, state: 'outgoing' });
+});
+
+api.post('/friends/requests/:id/accept', needUser, socialLimiter, (req, res) => {
+  const me = req.user.id;
+  const from = targetUserId(req);
+  if (from == null || !db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?').get(from, me)) {
+    return res.status(404).json({ error: 'request_not_found' });
+  }
+  makeFriends(me, from);
+  announceFriendship(me, from);
+  res.json({ ok: true });
+});
+
+// Declining is silent: the sender is not told, and can't ask again for a week.
+api.post('/friends/requests/:id/decline', needUser, socialLimiter, (req, res) => {
+  const from = targetUserId(req);
+  const info = from == null ? { changes: 0 } : db.prepare('UPDATE friend_requests SET declined_at = ?, seen_at = COALESCE(seen_at, ?) WHERE from_id = ? AND to_id = ? AND declined_at IS NULL').run(Date.now(), Date.now(), from, req.user.id);
+  if (!info.changes) return res.status(404).json({ error: 'request_not_found' });
+  emitTo(req.user.id, 'friends:changed', {}); // refreshes the bell in your other tabs
+  res.json({ ok: true });
+});
+
+// Take back a request you sent.
+api.delete('/friends/requests/:id', needUser, (req, res) => {
+  const to = targetUserId(req);
+  if (to != null && db.prepare('DELETE FROM friend_requests WHERE from_id = ? AND to_id = ?').run(req.user.id, to).changes) {
+    emitTo(to, 'notif:new', { type: 'friend_request_cancelled' });
   }
   res.json({ ok: true });
 });
 
+// Unfriending removes both sides, so neither of you sees the other's online status any more.
 api.delete('/friends/:id', needUser, (req, res) => {
-  db.prepare('DELETE FROM friends WHERE user_id = ? AND friend_id = ?').run(req.user.id, Number(req.params.id));
+  const me = req.user.id;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid_user' });
+  db.prepare('DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)').run(me, id, id, me);
+  db.prepare('DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)').run(me, id, id, me);
+  db.prepare("DELETE FROM notifications WHERE type = 'friend_accepted' AND ((user_id = ? AND from_id = ?) OR (user_id = ? AND from_id = ?))").run(me, id, id, me);
+  emitTo(id, 'friends:changed', {});
+  emitTo(me, 'friends:changed', {});
   res.json({ ok: true });
 });
 
@@ -281,38 +365,101 @@ api.get('/notifications', needUser, (req, res) => {
     .all(me, me, me);
   const inbox = threads.filter((t) => t.is_friend);
   const spam = threads.filter((t) => !t.is_friend);
-  const friendAdds = db
+  // Friend requests waiting for an answer (declined ones are hidden), and "accepted your request" notices.
+  const requests = db
+    .prepare(
+      `SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at, r.created_at, r.seen_at
+       FROM friend_requests r JOIN users u ON u.id = r.from_id
+       WHERE r.to_id = ? AND r.declined_at IS NULL ORDER BY r.created_at DESC LIMIT 50`,
+    )
+    .all(me);
+  const accepted = db
     .prepare(
       `SELECT n.id, n.created_at, n.read_at, u.id AS from_id, u.handle, u.display_name
        FROM notifications n JOIN users u ON u.id = n.from_id
-       WHERE n.user_id = ? AND n.type = 'friend_add' ORDER BY n.id DESC LIMIT 20`,
+       WHERE n.user_id = ? AND n.type = 'friend_accepted' ORDER BY n.id DESC LIMIT 20`,
     )
     .all(me);
+  const groups = unreadGroups(me);
   const sum = (list) => list.reduce((s, t) => s + t.unread, 0);
-  // The bell badge counts friends' messages and new-friend alerts. Spam is shown in its own tab and never alerts.
-  res.json({ inbox, spam, friendAdds, badge: sum(inbox) + friendAdds.filter((n) => !n.read_at).length, spamUnread: sum(spam) });
+  // The bell badge counts friends' messages, group messages, new friend requests and acceptances. Spam is shown in its own tab and never alerts.
+  const badge = sum(inbox) + sum(groups) + requests.filter((r) => !r.seen_at).length + accepted.filter((n) => !n.read_at).length;
+  res.json({ inbox, spam, requests, accepted, groups, badge, spamUnread: sum(spam) });
 });
 
+// Opening the bell marks notices as seen. Message and group badges clear when you open that chat.
 api.post('/notifications/read', needUser, (req, res) => {
-  db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(Date.now(), req.user.id);
+  const now = Date.now();
+  db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(now, req.user.id);
+  db.prepare('UPDATE friend_requests SET seen_at = ? WHERE to_id = ? AND seen_at IS NULL').run(now, req.user.id);
+  res.json({ ok: true });
+});
+
+// Everything read at once: messages (inbox and spam), groups, friend notices and requests. Pending requests stay
+// pending (you still have to answer them); they just stop counting as new.
+api.post('/notifications/read-all', needUser, (req, res) => {
+  const me = req.user.id;
+  const now = Date.now();
+  db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND read_at IS NULL').run(now, me);
+  db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(now, me);
+  db.prepare('UPDATE friend_requests SET seen_at = ? WHERE to_id = ? AND seen_at IS NULL').run(now, me);
+  db.prepare('UPDATE group_members SET last_read_id = COALESCE((SELECT MAX(id) FROM group_messages x WHERE x.group_id = group_members.group_id), 0) WHERE user_id = ?').run(me);
+  emitTo(me, 'notif:new', { type: 'read_all' }); // keeps your other tabs in sync
   res.json({ ok: true });
 });
 
 /* ---------- group chats ---------- */
+// Rules: anyone in a group can rename it and add their own friends. Anyone can leave. Only the creator can remove other
+// people. If the creator leaves, the longest-standing member becomes the creator. When the last person leaves, the group is deleted.
+// People only see messages from after they joined (so someone added later doesn't read old conversations).
 const MAX_GROUP = 20;
 const isMember = (groupId, userId) => !!db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, userId);
 const memberIds = (groupId) => db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(groupId).map((r) => r.user_id);
 const groupFor = (req, res) => {
   const id = Number(req.params.id);
-  const g = Number.isInteger(id) ? db.prepare('SELECT id, name, created_by, created_at FROM group_chats WHERE id = ?').get(id) : null;
-  if (!g || !isMember(g.id, req.user.id)) { res.status(404).json({ error: 'group_not_found' }); return null; }
+  const g = Number.isInteger(id)
+    ? db
+        .prepare(
+          `SELECT g.id, g.name, g.created_by, g.created_at, m.joined_at FROM group_chats g
+           JOIN group_members m ON m.group_id = g.id AND m.user_id = ? WHERE g.id = ?`,
+        )
+        .get(req.user.id, id)
+    : null;
+  if (!g) { res.status(404).json({ error: 'group_not_found' }); return null; }
   return g;
 };
+const markGroupRead = (groupId, userId) =>
+  db
+    .prepare('UPDATE group_members SET last_read_id = (SELECT COALESCE(MAX(id), 0) FROM group_messages WHERE group_id = ?) WHERE group_id = ? AND user_id = ?')
+    .run(groupId, groupId, userId);
+
+// Groups with unread messages for the bell and the group rows. Your own messages and the "X left" notes never count.
+function unreadGroups(me) {
+  const rows = db
+    .prepare(
+      `SELECT g.id, g.name,
+         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg') AS unread
+       FROM group_chats g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?`,
+    )
+    .all(me, me)
+    .filter((r) => r.unread > 0);
+  const last = db.prepare("SELECT u.display_name AS from_name, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' ORDER BY x.id DESC LIMIT 1");
+  return rows.map((r) => ({ ...r, ...last.get(r.id) })).sort((a, b) => b.created_at - a.created_at);
+}
+
+// A note in the chat ("Sam left"). Sent to everyone still in the group.
+function groupNote(group, actorId, text) {
+  const now = Date.now();
+  const info = db.prepare("INSERT INTO group_messages(group_id, from_id, body, created_at, kind) VALUES (?,?,?,?,'system')").run(group.id, actorId, text, now);
+  const message = { id: Number(info.lastInsertRowid), from_id: actorId, from_name: '', body: text, created_at: now, kind: 'system' };
+  for (const id of memberIds(group.id)) emitTo(id, 'group:msg', { group_id: group.id, group_name: group.name, message });
+}
+const joinList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]);
 
 api.get('/groups', needUser, (req, res) => {
   const groups = db
     .prepare(
-      `SELECT g.id, g.name, g.created_at,
+      `SELECT g.id, g.name, g.created_by, g.created_at,
          (SELECT COUNT(*) FROM group_members x WHERE x.group_id = g.id) AS member_count
        FROM group_chats g JOIN group_members m ON m.group_id = g.id
        WHERE m.user_id = ? ORDER BY g.created_at DESC`,
@@ -326,8 +473,7 @@ api.post('/groups', needUser, socialLimiter, (req, res) => {
   const name = cleanName(req.body?.name, 40);
   const ids = [...new Set((Array.isArray(req.body?.memberIds) ? req.body.memberIds : []).map(Number))].filter((n) => Number.isInteger(n) && n !== req.user.id);
   if (!name || !ids.length || ids.length + 1 > MAX_GROUP) return res.status(400).json({ error: 'invalid_group' });
-  const isFriend = db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?');
-  if (!ids.every((id) => isFriend.get(req.user.id, id))) return res.status(400).json({ error: 'not_a_friend' });
+  if (!ids.every((id) => areFriends(req.user.id, id))) return res.status(400).json({ error: 'not_a_friend' });
   const now = Date.now();
   let groupId;
   db.exec('BEGIN');
@@ -340,7 +486,7 @@ api.post('/groups', needUser, socialLimiter, (req, res) => {
     db.exec('ROLLBACK');
     throw e;
   }
-  const group = { id: groupId, name, created_at: now, member_count: ids.length + 1 };
+  const group = { id: groupId, name, created_by: req.user.id, created_at: now, member_count: ids.length + 1 };
   for (const id of ids) emitTo(id, 'group:new', { group, by: req.user.display_name });
   res.json({ group });
 });
@@ -356,7 +502,8 @@ api.get('/groups/:id', needUser, (req, res) => {
     )
     .all(g.id)
     .map((u) => ({ ...u, is_creator: u.id === g.created_by }));
-  res.json({ group: g, members });
+  const { joined_at, ...group } = g;
+  res.json({ group, members });
 });
 
 // Any member can rename the group.
@@ -370,16 +517,88 @@ api.patch('/groups/:id', needUser, socialLimiter, (req, res) => {
   res.json({ ok: true, name });
 });
 
+// Add people. Each one has to be on YOUR friend list; they get no history from before they joined.
+api.post('/groups/:id/members', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const me = req.user.id;
+  const ids = [...new Set((Array.isArray(req.body?.memberIds) ? req.body.memberIds : []).map(Number))].filter((n) => Number.isInteger(n) && n !== me);
+  if (!ids.length) return res.status(400).json({ error: 'invalid_group' });
+  const current = new Set(memberIds(g.id));
+  const fresh = ids.filter((id) => !current.has(id));
+  if (!fresh.every((id) => areFriends(me, id))) return res.status(400).json({ error: 'not_a_friend' });
+  if (current.size + fresh.length > MAX_GROUP) return res.status(400).json({ error: 'group_full' });
+  if (!fresh.length) return res.json({ ok: true, added: 0 });
+  const now = Date.now();
+  db.exec('BEGIN');
+  try {
+    const lastId = db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM group_messages WHERE group_id = ?').get(g.id).n;
+    const add = db.prepare('INSERT INTO group_members(group_id, user_id, joined_at, last_read_id) VALUES (?,?,?,?)');
+    for (const id of fresh) add.run(g.id, id, now, lastId);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  const names = fresh.map((id) => db.prepare('SELECT display_name FROM users WHERE id = ?').get(id).display_name);
+  const group = { id: g.id, name: g.name, created_by: g.created_by, created_at: g.created_at, member_count: current.size + fresh.length };
+  for (const id of fresh) emitTo(id, 'group:new', { group, by: req.user.display_name });
+  groupNote(g, me, `${req.user.display_name} added ${joinList(names)}`);
+  for (const id of memberIds(g.id)) emitTo(id, 'group:members', { group_id: g.id });
+  res.json({ ok: true, added: fresh.length });
+});
+
+// Leave (your own id) or remove someone (creator only).
+api.delete('/groups/:id/members/:userId', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const me = req.user.id;
+  const target = Number(req.params.userId);
+  if (!Number.isInteger(target) || !isMember(g.id, target)) return res.status(404).json({ error: 'member_not_found' });
+  if (target !== me && g.created_by !== me) return res.status(403).json({ error: 'not_group_creator' });
+  const name = db.prepare('SELECT display_name FROM users WHERE id = ?').get(target).display_name;
+  let remaining;
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM group_members WHERE group_id = ? AND user_id = ?').run(g.id, target);
+    remaining = memberIds(g.id);
+    if (!remaining.length) db.prepare('DELETE FROM group_chats WHERE id = ?').run(g.id); // messages go with it
+    else if (g.created_by === target) {
+      const heir = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? ORDER BY joined_at, user_id LIMIT 1').get(g.id).user_id;
+      db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?').run(heir, g.id);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  emitTo(target, 'group:removed', { group_id: g.id, group_name: g.name, left: target === me }); // includes their other tabs
+  if (remaining.length) {
+    groupNote(g, me, target === me ? `${name} left` : `${req.user.display_name} removed ${name}`);
+    for (const id of remaining) emitTo(id, 'group:members', { group_id: g.id });
+  }
+  res.json({ ok: true });
+});
+
+api.post('/groups/:id/read', needUser, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  markGroupRead(g.id, req.user.id);
+  res.json({ ok: true });
+});
+
+// Opening a group's messages marks them read.
 api.get('/groups/:id/messages', needUser, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
   const messages = db
     .prepare(
-      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at
-       FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? ORDER BY m.id DESC LIMIT 50`,
+      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at, m.kind
+       FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? AND m.created_at >= ? ORDER BY m.id DESC LIMIT 50`,
     )
-    .all(g.id)
+    .all(g.id, g.joined_at)
     .reverse();
+  markGroupRead(g.id, req.user.id);
   res.json({ messages });
 });
 
@@ -390,7 +609,42 @@ api.post('/groups/:id/messages', needUser, socialLimiter, (req, res) => {
   if (!body) return res.status(400).json({ error: 'invalid_message' });
   const now = Date.now();
   const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at) VALUES (?,?,?,?)').run(g.id, req.user.id, body, now);
-  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now };
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg' };
   for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
   res.json({ message });
+});
+
+/* ---------- chats list: every conversation you have, newest first ---------- */
+// Friends you've messaged (or who messaged you) plus your groups, each with its last message and unread count.
+// The bell only shows what's unread; this is where read conversations live.
+api.get('/chats', needUser, (req, res) => {
+  const me = req.user.id;
+  const dms = db
+    .prepare(
+      `SELECT p.other AS id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at,
+         m.body, m.from_id, m.created_at,
+         (SELECT COUNT(*) FROM messages x WHERE x.to_id = ? AND x.from_id = p.other AND x.read_at IS NULL) AS unread
+       FROM (SELECT CASE WHEN from_id = ? THEN to_id ELSE from_id END AS other, MAX(id) AS last_id
+             FROM messages WHERE from_id = ? OR to_id = ? GROUP BY other) p
+       JOIN messages m ON m.id = p.last_id
+       JOIN users u ON u.id = p.other
+       WHERE EXISTS (SELECT 1 FROM friends f WHERE f.user_id = ? AND f.friend_id = p.other)
+       ORDER BY m.id DESC LIMIT 100`,
+    )
+    .all(me, me, me, me, me)
+    .map((r) => ({ type: 'dm', id: r.id, handle: r.handle, display_name: r.display_name, avatar_at: r.avatar_at, preview: r.body, mine: r.from_id === me, at: r.created_at, unread: r.unread }));
+  const lastMsg = db.prepare("SELECT u.display_name AS from_name, x.from_id, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' AND x.created_at >= ? ORDER BY x.id DESC LIMIT 1");
+  const groups = db
+    .prepare(
+      `SELECT g.id, g.name, g.created_at, m.joined_at,
+         (SELECT COUNT(*) FROM group_members z WHERE z.group_id = g.id) AS member_count,
+         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg') AS unread
+       FROM group_chats g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?`,
+    )
+    .all(me, me)
+    .map((g) => {
+      const l = lastMsg.get(g.id, g.joined_at);
+      return { type: 'group', id: g.id, name: g.name, member_count: g.member_count, preview: l ? l.body : null, from_name: l?.from_name ?? null, mine: l ? l.from_id === me : false, at: l ? l.created_at : g.created_at, unread: g.unread };
+    });
+  res.json({ chats: [...dms, ...groups].sort((a, b) => b.at - a.at) });
 });
