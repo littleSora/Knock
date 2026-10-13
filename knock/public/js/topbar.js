@@ -1,10 +1,11 @@
 import { api, h, icon, errText, toast, avatarEl, openModal, confirmDialog, friendActions } from './common.js';
+import { safetyActions, openReport } from './safety.js';
 import { profileButton } from './account.js';
 
-const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null };
+const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0 };
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtStamp = (ms) => `${fmtDate(ms)} at ${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-let bar, badgeEl, chatBadgeEl, panels;
+let bar, badgeEl, chatBadgeEl, panels, sock;
 
 // Search + friends + notifications, shared by the normal top bar and the in-call bar.
 function buildTools() {
@@ -247,31 +248,96 @@ function msgEl(m, other) {
 function appendMsg(m) {
   if (!S.chat || S.chat.messages.some((x) => x.id === m.id)) return;
   S.chat.messages.push(m);
-  const list = document.getElementById('chat-list');
-  list.append(S.chat.group ? groupMsgEl(m) : msgEl(m, S.chat.user));
-  list.scrollTop = list.scrollHeight;
+  const t = S.typing.get(m.from_id); // their message arrived, so "typing…" is over
+  if (t) { clearTimeout(t.timer); S.typing.delete(m.from_id); paintTyping(); }
+  renderChatList(true);
 }
+
+/* ---------- "Seen" receipts and typing indicators ---------- */
+// Redraws the open chat. The "Sent / Seen" line sits under the last message you sent.
+function renderChatList(stick) {
+  const list = document.getElementById('chat-list');
+  if (!list || !S.chat) return;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const g = S.chat.group;
+  const msgs = S.chat.messages;
+  const mine = (m) => (g ? m.from_id === S.meId && m.kind !== 'system' : m.from_id !== S.chat.user.id);
+  const els = msgs.map((m) => (g ? groupMsgEl(m) : msgEl(m, S.chat.user)));
+  const last = msgs.findLastIndex(mine);
+  const r = last >= 0 ? receiptEl(msgs[last]) : null;
+  if (r) els.splice(last + 1, 0, r);
+  list.replaceChildren(...els);
+  if (stick || atBottom) list.scrollTop = list.scrollHeight;
+}
+function receiptEl(m) {
+  if (!S.share) return null; // if you keep yours private you don't see anyone's either
+  const c = S.chat;
+  let text;
+  if (c.group) {
+    const reads = c.reads || [];
+    const seen = reads.filter((r) => r.last_read_id != null && r.last_read_id >= m.id);
+    text = !seen.length ? 'Sent' : seen.length === reads.length ? 'Seen by everyone'
+      : 'Seen by ' + (seen.length > 2 ? `${seen[0].name}, ${seen[1].name} +${seen.length - 2}` : seen.map((r) => r.name).join(', '));
+  } else text = m.read_at ? `Seen ${shortWhen(m.read_at)}` : 'Sent';
+  return h('div', { class: 'receipt' }, text);
+}
+function typingText() {
+  const names = [...S.typing.values()].map((t) => t.name);
+  if (!names.length) return '';
+  if (names.length === 1) return `${names[0]} is typing`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
+  return 'Several people are typing';
+}
+function paintTyping() {
+  const el = document.getElementById('chat-status');
+  if (!el) return;
+  const text = S.share ? typingText() : '';
+  el.replaceChildren(...(text ? [h('span', { class: 'typing-dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), text + '…'] : []));
+}
+function clearTyping() { S.typing.forEach((t) => clearTimeout(t.timer)); S.typing.clear(); paintTyping(); }
+// Tell the other side we're typing (at most every 2.5 s while keys are pressed; they hide it after 5 s of silence).
+function wireTyping(input, target) {
+  stopTyping();
+  clearTyping();
+  S.typingTarget = target;
+  input.addEventListener('input', () => {
+    if (!S.share || !sock?.connected) return;
+    if (!input.value.trim()) return stopTyping();
+    const now = Date.now();
+    if (now - S.typingSentAt > 2500) { S.typingSentAt = now; sock.emit('typing', { ...target, on: true }); }
+  });
+  input.addEventListener('blur', stopTyping);
+}
+function stopTyping() {
+  if (S.typingSentAt && S.typingTarget && sock?.connected) sock.emit('typing', { ...S.typingTarget, on: false });
+  S.typingSentAt = 0;
+}
+function closeChat() { stopTyping(); clearTyping(); S.chat = null; document.getElementById('chat-dock')?.remove(); }
+
 async function openChat(u, { focus = true } = {}) {
   if (focus) closePanels();
   const { messages } = await api('/api/messages/with/' + u.id);
+  stopTyping();
   S.chat = { user: { id: u.id, display_name: u.display_name }, messages };
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${u.display_name}`, 'aria-label': 'Message', autocomplete: 'off' });
-  const list = h('div', { class: 'chat-list', id: 'chat-list' }, messages.map((m) => msgEl(m, u)));
+  const list = h('div', { class: 'chat-list', id: 'chat-list' });
   const form = h('form', { class: 'chat-form', onsubmit: async (e) => {
     e.preventDefault();
     const body = input.value.trim();
     if (!body) return;
     input.value = '';
+    stopTyping();
     try { appendMsg((await api('/api/messages', { method: 'POST', body: { toId: u.id, body } })).message); }
     catch (err) { toast(errText(err)); input.value = body; }
   } }, input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Chat with ${u.display_name}` },
     h('header', {}, h('button', { class: 'name-btn', type: 'button', 'aria-haspopup': 'dialog', title: 'View profile', onclick: () => openProfileCard(u) }, u.display_name), h('span', { class: 'grow' }),
       h('button', { class: 'link-btn', onclick: () => inviteToCall(u) }, 'Invite to call'),
-      h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: () => { S.chat = null; document.getElementById('chat-dock').remove(); } }, icon('x', 16))),
-    list, form));
-  list.scrollTop = list.scrollHeight;
+      h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
+    list, h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
+  wireTyping(input, { to: u.id });
+  renderChatList(true);
   if (focus) input.focus();
   refreshNotif();
 }
@@ -305,12 +371,16 @@ async function openProfileCard(u) {
           h('dt', {}, 'Username'), h('dd', {}, '@' + p.handle),
           h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
           h('dt', {}, 'Joined'), h('dd', {}, fmtDate(p.created_at)),
-          h('dt', {}, 'Friend'), h('dd', {}, { friend: 'Yes, you’re friends', outgoing: 'Friend request sent', incoming: 'Wants to be your friend' }[relation] || 'Not friends yet')),
+          h('dt', {}, 'Friend'), h('dd', {}, { friend: 'Yes, you’re friends', outgoing: 'Friend request sent', incoming: 'Wants to be your friend', blocked: 'Blocked' }[relation] || 'Not friends yet')),
         // Add friend / Request sent / Accept + Decline live here, so a chat with someone you're not friends with can fix that.
         relation === 'self' ? null : friendActions(p, relation, (next) => { paint(next); refreshFriends(); refreshNotif(); }),
         h('div', { class: 'pic-actions' },
           relation === 'friend' ? groupBtn : null, // groups can only include friends
-          h('a', { class: 'link-btn', href: '/u/' + p.handle, ...newTab() }, 'Full profile')));
+          h('a', { class: 'btn primary sm', href: '/u/' + p.handle, ...newTab() }, h('span', { class: 'btn-ic' }, icon('users', 16)), 'Full profile')),
+        relation === 'self' ? null : safetyActions(p, relation, { context: { type: 'dm' }, onChange: (next) => {
+          if (next === 'blocked' && S.chat?.user.id === p.id) closeChat(); // a blocked person's chat closes
+          paint(next); refreshFriends(); refreshNotif();
+        } }));
       (body.querySelector('.friend-actions button, .pic-actions button') || closeBtn).setAttribute('data-autofocus', '');
     };
     paint(first);
@@ -385,25 +455,28 @@ function groupMsgEl(m) {
 }
 async function openGroupChat(g, { focus = true } = {}) {
   if (focus) closePanels();
-  let messages;
-  try { ({ messages } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
-  S.chat = { group: { id: g.id, name: g.name }, messages };
+  let messages, reads;
+  try { ({ messages, reads } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
+  stopTyping();
+  S.chat = { group: { id: g.id, name: g.name }, messages, reads: reads || [] };
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${g.name}`, 'aria-label': 'Message the group', autocomplete: 'off', id: 'group-input' });
-  const list = h('div', { class: 'chat-list', id: 'chat-list' }, messages.map(groupMsgEl));
+  const list = h('div', { class: 'chat-list', id: 'chat-list' });
   const form = h('form', { class: 'chat-form', onsubmit: async (e) => {
     e.preventDefault();
     const body = input.value.trim();
     if (!body) return;
     input.value = '';
+    stopTyping();
     try { appendMsg((await api(`/api/groups/${g.id}/messages`, { method: 'POST', body: { body } })).message); }
     catch (err) { toast(errText(err)); input.value = body; }
   } }, input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Group chat ${g.name}` },
     h('header', {}, h('button', { class: 'name-btn', id: 'group-title', type: 'button', 'aria-haspopup': 'dialog', title: 'Group info', onclick: () => openGroupInfo(S.chat.group) }, g.name), h('span', { class: 'grow' }),
-      h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: () => { S.chat = null; document.getElementById('chat-dock').remove(); } }, icon('x', 16))),
-    list, form));
-  list.scrollTop = list.scrollHeight;
+      h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
+    list, h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
+  wireTyping(input, { group_id: g.id });
+  renderChatList(true);
   if (focus) input.focus();
   refreshNotif(); // opening the chat marked it read, so its badge clears
 }
@@ -464,6 +537,7 @@ async function openGroupInfo(g) {
         avatarEl(u, 34),
         h('div', { class: 'row-main pick-text' }, h('span', { class: 'name' }, u.id === S.meId ? `${u.display_name} (you)` : u.display_name), h('span', { class: 'sub' }, '@' + u.handle)),
         u.is_creator ? h('span', { class: 'member-tag' }, 'Creator') : null,
+        u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Report ${u.display_name}`, onclick: () => openReport(u, { context: { type: 'group', id: group.id } }) }, 'Report') : null,
         iAmCreator && u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Remove ${u.display_name}`, onclick: () => removeMember(u) }, 'Remove') : null))),
       h('button', { class: 'btn sm', type: 'button', onclick: () => { view = 'add'; refreshFriends().then(() => view === 'add' && render()); render(); } }, h('span', { class: 'btn-ic' }, icon('userPlus', 16)), 'Add people'),
       h('h3', {}, 'Change group name'), form, msg,
@@ -495,7 +569,7 @@ async function openGroupInfo(g) {
 // You're no longer in this group (you left, were removed, or it was deleted): tidy up everywhere it showed.
 function dropGroup(id) {
   S.groups = S.groups.filter((x) => x.id !== id);
-  if (S.chat?.group?.id === id) { S.chat = null; document.getElementById('chat-dock')?.remove(); }
+  if (S.chat?.group?.id === id) closeChat();
   if (S.groupInfo?.id === id) S.groupInfo.modal.close();
   renderFriends();
   refreshNotif();
@@ -515,7 +589,36 @@ function applyGroupName(id, name) {
 /* ---------- realtime ---------- */
 function connect() {
   const socket = window.io();
+  sock = socket;
+  api('/api/me').then((r) => { S.share = r.user.share_activity; }).catch(() => {});
+  window.addEventListener('activity-updated', (e) => { // the switch in Settings
+    S.share = e.detail;
+    if (!S.share) { stopTyping(); clearTyping(); }
+    renderChatList(false);
+  });
   socket.on('connect', () => { refreshFriends(); refreshGroups(); refreshNotif(); });
+  // The other person opened the chat: show "Seen" under everything of mine they hadn't read.
+  socket.on('dm:read', ({ by, at }) => {
+    if (S.chat?.user?.id !== by) return;
+    S.chat.messages.forEach((m) => { if (m.from_id !== by && !m.read_at) m.read_at = at; });
+    renderChatList(false);
+  });
+  socket.on('group:read', ({ group_id: gid, user_id: uid, name, last_read_id: last }) => {
+    if (S.chat?.group?.id !== gid) return;
+    const r = S.chat.reads.find((x) => x.id === uid);
+    if (r) { r.last_read_id = last; r.name = name; } else S.chat.reads.push({ id: uid, name, last_read_id: last });
+    renderChatList(false);
+  });
+  socket.on('typing', ({ from, name, group_id: gid, on }) => {
+    if (!S.share || !S.chat) return;
+    const here = gid != null ? S.chat.group?.id === gid : !S.chat.group && S.chat.user.id === from;
+    if (!here) return;
+    const old = S.typing.get(from);
+    if (old) clearTimeout(old.timer);
+    if (on) S.typing.set(from, { name, timer: setTimeout(() => { S.typing.delete(from); paintTyping(); }, 5000) });
+    else S.typing.delete(from);
+    paintTyping();
+  });
   socket.on('dm:echo', () => refreshChats());
   socket.on('presence', ({ id, online }) => {
     const f = S.friends.find((x) => x.id === id);

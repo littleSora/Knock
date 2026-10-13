@@ -1,4 +1,4 @@
-import { api, h, errText, toast, confirmDialog } from './common.js';
+import { api, h, errText, toast, confirmDialog, avatarEl } from './common.js';
 import { mountTopbar } from './topbar.js';
 import { PRESETS, resolve, specOf, toCustom, readability, parseTheme } from './theme-core.js';
 import { setTheme, getTheme, prefersDark } from './theme.js';
@@ -216,7 +216,7 @@ function signIn() {
 function names() {
   const msg = h('p', { class: 'error', role: 'alert' });
   const name = h('input', { id: 'sName', maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name });
-  const nameForm = h('form', {}, h('label', { for: 'sName' }, 'Display name'), name, h('button', { class: 'btn sm' }, 'Save name'));
+  const nameForm = h('form', {}, h('label', { for: 'sName' }, 'Display name'), name, h('div', { class: 'pic-actions' }, h('button', { class: 'btn sm' }, 'Save name'), h('a', { class: 'btn sm', href: '/profile/edit' }, 'Edit details')));
   nameForm.addEventListener('submit', async (e) => {
     e.preventDefault(); msg.textContent = '';
     try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: name.value } }); me.display_name = user.display_name = r.display_name; announce(); toast('Name saved'); }
@@ -244,4 +244,33 @@ function security() {
   return section('seH', 'Security', h('p', { class: 'hint' }, 'Lost a phone or used a shared computer? End every other login at once.'), h('div', { class: 'set-actions' }, btn));
 }
 
-root.replaceChildren(appearance(), signIn(), names(), security());
+function chatPrivacy() {
+  const box = h('input', { type: 'checkbox', id: 'shareAct', checked: me.share_activity });
+  box.addEventListener('change', async () => {
+    try {
+      await api('/api/me/activity', { method: 'PUT', body: { on: box.checked } });
+      window.dispatchEvent(new CustomEvent('activity-updated', { detail: box.checked }));
+      toast(box.checked ? 'Read receipts and typing indicators are on' : 'Read receipts and typing indicators are off');
+    } catch (err) { box.checked = !box.checked; toast(errText(err)); }
+  });
+  return section('chH', 'Chat privacy',
+    h('label', { class: 'check-row', for: 'shareAct' }, box, h('span', {}, 'Show when I’ve read messages and when I’m typing')),
+    h('p', { class: 'hint' }, 'Friends see “Seen” under their messages once you’ve opened the chat, and “typing…” while you write. It only works between friends. If you turn this off you also stop seeing it for other people.'));
+}
+
+function blocked() {
+  const list = h('div', {}, h('p', { class: 'hint' }, 'Loading…'));
+  const paint = (people) => list.replaceChildren(people.length
+    ? h('ul', { class: 'rows' }, people.map((u) => h('li', { class: 'row blocked-row' },
+      avatarEl(u, 34),
+      h('div', { class: 'row-main' }, h('span', { class: 'name' }, u.display_name), h('span', { class: 'sub' }, '@' + u.handle)),
+      h('button', { class: 'btn sm', type: 'button', 'aria-label': `Unblock ${u.display_name}`, onclick: async () => {
+        try { await api('/api/blocks/' + u.id, { method: 'DELETE' }); toast(`Unblocked ${u.display_name}`); paint(people.filter((x) => x.id !== u.id)); }
+        catch (err) { toast(errText(err)); }
+      } }, 'Unblock'))))
+    : h('p', { class: 'empty' }, 'You haven’t blocked anyone.'));
+  api('/api/blocks').then((r) => paint(r.blocked)).catch((err) => list.replaceChildren(h('p', { class: 'error' }, errText(err))));
+  return section('blH', 'Blocked people', h('p', { class: 'hint' }, 'Blocked people can’t message you, send you friend requests, find your profile or join a call you’re in. They aren’t told. Unblocking doesn’t bring a friendship back.'), list);
+}
+
+root.replaceChildren(appearance(), signIn(), names(), chatPrivacy(), blocked(), security());

@@ -54,8 +54,17 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 | Friend profile card + group chats | In a direct-message chat, the friend's name (no underline) opens their picture and details, with **Create a group with …**. Name the group, then **Add another friend** shows your friend list (or a "make a friend first" note if it's empty). Groups appear in the Friends panel with an unread count. In a group chat, tapping the group name shows its name, creation date, members, **Add people**, **Remove** (creator only), a rename box and **Leave group** (`server/api.js` `/api/groups*`, `public/js/topbar.js`) |
 | Profile menu | Round picture button, top right (and in calls). Change display name, see account details (Gmail/email and mobile show `n/a` when empty), upload a picture up to 3 MB and crop it to the circle (`public/js/account.js`, `cropper.js`). Stored as a 256×256 JPEG in the `avatars` table; the server accepts only real PNG/JPEG/WebP bytes up to 512 KB |
 | Settings page | **Settings** button at the bottom of the account info (round picture, top right) opens `/settings` (a new tab when you're in a call). Sections: Appearance, Email/phone/sign-in, Names, Security. See below |
+| Block and report | **Block** and **Report** sit under every profile: the profile card in a call, the card in a direct-message chat, the `/u/<handle>` page, and each member in a group's info card. Report is a three-step dialog (category, reason, details) with the presets in `public/js/report-categories.js`. Blocked people are listed under **Settings > Blocked people**. See below |
 | CAPTCHA | reCAPTCHA gate at `/verify`. Every page, API route and WebSocket needs the signed "human" cookie it sets |
 | Hidden keys and endpoints | See below |
+
+## Read receipts and typing indicators
+
+- **Friend chats:** under the last message you sent, a small line says **Sent**, then **Seen 3:04 PM** once your friend has opened the chat (`dm:read`, using the existing `messages.read_at`).
+- **Group chats:** the same line says **Sent**, **Seen by Ana**, **Seen by Ana, Ben +1** or **Seen by everyone**, based on how far each member has read (`group_members.last_read_id`, pushed live with `group:read`).
+- **Typing:** "Ana is typing…" (also "Ana and Ben are typing…", "Several people are typing…") in friend chats, group chats and the in-call chat. Typing is never stored: the browser sends `typing` at most every 2.5 s while keys are pressed and `on: false` when you stop, send, close the chat or click away. Other people hide it after 5 s of silence.
+- **Privacy:** Settings > *Chat privacy* has one switch (`users.chat_activity`, on by default). Off means you neither show nor see receipts and typing. Between two people it only works when both have it on, they are friends of each other and neither blocked the other, and this is enforced on the server (`shareActivity` in `server/db.js`). Someone who isn't your friend never learns whether you read their message.
+- Opening a chat (or "Mark all as read") is what counts as reading. Spam-tab messages never send a receipt.
 
 ## Settings page (`/settings`)
 
@@ -74,6 +83,31 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 - Login cookie: random token, `HttpOnly`, `SameSite=Lax`, `Secure` in production, only its hash is stored. Cross-site POSTs are rejected, WebSockets are same-origin only, and `helmet` sets a strict Content-Security-Policy.
 - Names and messages are rendered as text (never as HTML).
 
+## Blocking and reporting
+
+**Block** (`POST /api/blocks/:id`, `DELETE` to unblock, `GET /api/blocks`). Quiet: the other person gets no notice.
+- Unfriends both sides and cancels pending friend requests either way.
+- They can't message you (they get "You can't contact this person"), friend requests from them are silently dropped (like a decline), they can't find you in search or open your profile (it looks like it doesn't exist), and they can't join a call you're in (either way round).
+- You can't message or friend someone you've blocked until you unblock them. **Unblocking does not bring a friendship back.**
+- Their old messages are hidden from your bell but stay in the database, in case a report needs them.
+- People who blocked each other can't be put in the same new group (`cannot_add_member`).
+
+**Report** (`POST /api/reports`). Category and reason are validated against `public/js/report-categories.js`, which the server and the dialog share. To change the presets, edit that one file (never change an `id`, only labels; ids are stored in the database). "Something else" requires details. Details are capped at 500 characters, a person can send 10 reports an hour, and the same report sent twice in a day is stored once. The reported person is never told.
+- Where it came from (`context`) is checked, not trusted. From a **chat**, the last 20 messages are copied into the report; from a **group**, the last 20 messages since the reporter joined; from a **call**, the session code is kept only if both people were really in that call. The dialog tells the reporter that chat and group messages are included.
+- "Also block" is a checkbox on the details step, and the confirmation screen offers it again.
+
+**Reviewing reports.** There is no admin web page (nothing extra to secure). Use the terminal:
+
+```powershell
+npm run reports                          # open reports, oldest first
+npm run reports -- show 12               # one report in full, with the saved messages
+npm run reports -- resolve 12 "warned"   # mark actioned
+npm run reports -- dismiss 12            # mark dismissed
+npm run reports -- all                   # everything
+```
+
+What this does not do yet: guests can't be reported or blocked (they have no account, so only the signed-in profile cards have these buttons); blocking someone who is already in your current call doesn't remove them (leave and rejoin, or the host can end the session); messages from a blocked person inside a group you share are still shown; and nothing is done automatically about a person who gets many reports.
+
 ## Behavior worth knowing
 
 - **Friendships are mutual.** A friend request does nothing until the other person accepts. Only then do you appear in each other's lists, see each other's online status, and skip each other's Spam tab. If two people ask each other, they become friends straight away. **Declining is silent**: the sender isn't told (they keep seeing "Request sent") and can't ask again for 7 days. Cancelling a request or unfriending is immediate. Upgrading from an older version converts old one-way adds into pending requests (people who had added each other stay friends), so nobody's presence is exposed without a yes.
@@ -81,4 +115,4 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 - A "call" for the dashboard is a session where you were present with at least one other person.
 - Run a single server process; presence and live rooms are kept in memory.
 - **Groups.** Anyone in a group can rename it and add *their own* friends (up to 20 people). Anyone can leave. Only the creator can remove other people. If the creator leaves, the longest-standing member becomes the creator; when the last person leaves, the group is deleted. People see only messages from after they joined, and "X added Y" / "X left" notes appear in the chat. Unread counts show on each group row and in the bell badge; your own messages and those notes never count.
-- Not included yet: blocking/reporting, account deletion, linking Google from Settings (it links automatically the first time you use Google with the same email), email/SMS cost controls beyond rate limits.
+- Not included yet: account deletion, linking Google from Settings (it links automatically the first time you use Google with the same email), email/SMS cost controls beyond rate limits.

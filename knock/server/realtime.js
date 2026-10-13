@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import { parseCookie } from 'cookie';
 import cookieParser from 'cookie-parser';
-import { db, sessionInfo, endSession } from './db.js';
+import { db, sessionInfo, endSession, blockedEither, activityOn, shareActivity } from './db.js';
 import { cfg } from './env.js';
 import { userFromToken } from './auth.js';
 import { isHuman } from './security.js';
@@ -75,6 +75,8 @@ function joinRoom(socket, p = {}, ack) {
   // One seat per account: you can't join a call you're already in (another tab, browser or device), so nobody
   // ends up in a call with themselves, e.g. by opening their own invite link.
   if (user && [...room].some(([sid, m]) => m.userId === user.id && sid !== socket.id)) return reply({ error: 'already_in_call' });
+  // If you and someone already in the call have blocked each other (either way), you can't join. The error is generic on purpose.
+  if (user && [...room.values()].some((m) => m.userId && m.userId !== user.id && blockedEither(user.id, m.userId))) return reply({ error: 'cannot_join' });
   if (room.size >= MAX_PEOPLE) return reply({ error: 'room_full' });
   const peers = [...room].map(([sid, m]) => ({ id: sid, nickname: m.nickname, handle: m.handle, avatarAt: m.avatarAt }));
   const handle = user?.handle ?? null; // lets other people open this person's profile card (guests have none)
@@ -156,13 +158,43 @@ function onConnect(socket) {
     io.to(`r:${roomId}`).emit('room:chat', { from: socket.id, nickname: self.nickname, body, at: now });
   });
 
+  /* ---------- typing indicators (never stored; only sent between people who share them) ---------- */
+  // { to } for a direct chat, { group_id } for a group. `on: false` means they stopped. Starts are throttled.
+  socket.on('typing', (p = {}) => {
+    if (!me || !p || typeof p !== 'object') return;
+    const on = p.on !== false;
+    const now = Date.now();
+    if (on && now - (socket.data.lastTyping || 0) < 1500) return;
+    if (on) socket.data.lastTyping = now;
+    const name = db.prepare('SELECT display_name FROM users WHERE id = ?').get(me.id)?.display_name;
+    if (!name) return;
+    if (p.group_id != null) {
+      const gid = Number(p.group_id);
+      const ids = Number.isInteger(gid) ? db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(gid).map((r) => r.user_id) : [];
+      if (!ids.includes(me.id) || !activityOn(me.id)) return;
+      for (const id of ids) if (id !== me.id && activityOn(id) && !blockedEither(id, me.id)) emitTo(id, 'typing', { group_id: gid, from: me.id, name, on });
+    } else {
+      const to = Number(p.to);
+      if (Number.isInteger(to) && to !== me.id && shareActivity(me.id, to)) emitTo(to, 'typing', { from: me.id, name, on });
+    }
+  });
+  // Typing in a call's chat: shown to the others in the same call.
+  socket.on('room:typing', (on) => {
+    const roomId = socket.data.room;
+    const self = roomId && rooms.get(roomId)?.get(socket.id);
+    const now = Date.now();
+    if (!self || (on !== false && now - (socket.data.lastRoomTyping || 0) < 1500)) return;
+    if (on !== false) socket.data.lastRoomTyping = now;
+    socket.to(`r:${roomId}`).emit('room:typing', { from: socket.id, nickname: self.nickname, on: on !== false });
+  });
+
   // Only the host can end the session: everyone is told, removed from the room, and the code stops working.
   socket.on('room:end', (ack) => {
     const reply = typeof ack === 'function' ? ack : () => {};
     const ctx = inRoom();
     if (!ctx || !ctx.room.get(socket.id)?.host) return reply({ error: 'not_host' });
     endSession(ctx.roomId);
-    io.to(`r:${ctx.roomId}`).emit('room:ended', {});
+    socket.to(`r:${ctx.roomId}`).emit('room:ended', {}); // everyone except the host: the host gets the ack below. Telling the host too made its page close the socket before the ack arrived, so it showed a false "couldn't end" error.
     for (const sid of ctx.room.keys()) {
       const s = io.sockets.sockets.get(sid);
       if (s) { s.data.room = null; s.leave(`r:${ctx.roomId}`); }

@@ -122,6 +122,33 @@ CREATE TABLE IF NOT EXISTS group_messages (
 );
 CREATE INDEX IF NOT EXISTS group_messages_by_group ON group_messages(group_id, id);
 -- Profile pictures: the browser crops to a small square before upload, so each row is tiny.
+-- Blocking: one row per direction. Whoever blocks is blocker_id. The blocked person is never told.
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id)
+);
+CREATE INDEX IF NOT EXISTS blocks_by_blocked ON blocks(blocked_id);
+-- Reports for the review team. category/reason come from public/js/report-categories.js. evidence is a JSON snapshot
+-- (recent messages) taken at report time, so it survives the sender deleting or the call ending. status: open | actioned | dismissed.
+CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY,
+  reporter_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reported_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  category TEXT NOT NULL,
+  reason TEXT,
+  details TEXT,
+  context_type TEXT NOT NULL DEFAULT 'profile',
+  context_ref TEXT,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL,
+  reviewed_at INTEGER,
+  review_note TEXT
+);
+CREATE INDEX IF NOT EXISTS reports_by_status ON reports(status, created_at);
+CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 CREATE TABLE IF NOT EXISTS avatars (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   mime TEXT NOT NULL,
@@ -184,6 +211,28 @@ if (db.prepare('PRAGMA user_version').get().user_version < 2) {
     SELECT MAX(id) FROM notifications WHERE type = 'friend_accepted' GROUP BY user_id, from_id)`);
   db.exec('PRAGMA user_version = 2');
 }
+
+// "Seen" receipts and typing indicators can be switched off per person (1 = on, the default). Off means both: you don't show
+// them and you don't see anyone else's.
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'chat_activity')) {
+  db.exec('ALTER TABLE users ADD COLUMN chat_activity INTEGER NOT NULL DEFAULT 1');
+}
+
+// Optional profile details people can fill in on /profile/edit (all NULL until then). birthday is 'YYYY-MM-DD'.
+for (const col of ['first_name', 'last_name', 'middle_initial', 'birthday', 'workplace', 'country']) {
+  if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+}
+
+// Blocking helpers. hasBlocked(a, b): a blocked b. blockedEither: either of them blocked the other.
+const blockOne = db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?');
+export const hasBlocked = (a, b) => !!blockOne.get(a, b);
+export const blockedEither = (a, b) => hasBlocked(a, b) || hasBlocked(b, a);
+
+const activityRow = db.prepare('SELECT chat_activity FROM users WHERE id = ?');
+const friendRow = db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?');
+export const activityOn = (id) => activityRow.get(id)?.chat_activity === 1;
+// Receipts / typing between two people in a direct chat: both switched it on, they are friends of each other, and neither blocked the other.
+export const shareActivity = (a, b) => activityOn(a) && activityOn(b) && !!friendRow.get(a, b) && !!friendRow.get(b, a) && !blockedEither(a, b);
 
 export function createSession(ownerId = null) {
   const insert = db.prepare('INSERT OR IGNORE INTO call_sessions(id, owner_id, created_at) VALUES (?, ?, ?)');

@@ -35,10 +35,14 @@
         <p id="recapsEmpty" class="empty" hidden>No recaps yet. They appear here after a call where someone adds a decision or follow-up.</p>
         <button id="recapMore" class="link-btn" hidden></button>
       </section>
-      <section class="block">
-        <h2>Your profile</h2>
-        <p class="hint">Friends find you with <strong id="handle"></strong></p>
-        <form id="nameForm"><label for="displayName">Display name</label><input id="displayName" maxlength="40" required><button class="btn sm">Save name</button></form>
+      <section class="block" aria-labelledby="jh">
+        <h2 id="jh">Join a call</h2>
+        <p class="hint">Got a code or an invite link? Paste it here to jump in.</p>
+        <form id="join" class="join-form">
+          <input id="joinCode" aria-label="Session code or link" placeholder="Paste a code or link" autocomplete="off" spellcheck="false">
+          <button class="btn">Join</button>
+        </form>
+        <p id="joinMsg" class="error" role="alert"></p>
       </section>
       <button id="instant" class="btn primary">Start an instant call</button>
     </aside>

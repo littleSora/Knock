@@ -14,10 +14,8 @@ const dayStart = midnight.getTime();
 const hour = new Date().getHours();
 const paintName = () => {
   $('hello').textContent = `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}, ${user.display_name}`;
-  $('displayName').value = user.display_name;
 };
 paintName();
-$('handle').textContent = '@' + user.handle;
 window.addEventListener('profile-updated', paintName); // the profile picture menu (top right) can change the name too
 
 async function load() {
@@ -45,10 +43,13 @@ $('sched').addEventListener('submit', async (e) => {
     load();
   } catch (err) { toast(err.code === 'invalid_appointment' ? 'Pick a title and a time that hasn’t passed.' : errText(err)); }
 });
-$('nameForm').addEventListener('submit', async (e) => {
+$('join').addEventListener('submit', async (e) => {
   e.preventDefault();
-  try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: $('displayName').value } }); user.display_name = r.display_name; window.dispatchEvent(new Event('profile-updated')); toast('Name saved'); }
-  catch (err) { toast(errText(err)); }
+  const id = $('joinCode').value.trim().split('/').filter(Boolean).pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') ?? '';
+  $('joinMsg').textContent = '';
+  if (id.length !== 10) { $('joinMsg').textContent = 'Codes have 10 letters and numbers.'; return; }
+  try { await api('/api/sessions/' + id); location.href = '/s/' + id; }
+  catch (err) { $('joinMsg').textContent = errText(err); }
 });
 $('instant').addEventListener('click', async () => { location.href = '/s/' + (await api('/api/sessions', { method: 'POST' })).id; });
 

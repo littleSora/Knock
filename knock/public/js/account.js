@@ -73,7 +73,7 @@ async function openAccount(user) {
     });
 
     const nameInput = h('input', { id: 'acctName', maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name });
-    const nameForm = h('form', {}, h('label', { for: 'acctName' }, 'Display name'), nameInput, h('button', { class: 'btn sm' }, 'Save name'));
+    const nameForm = h('form', {}, h('label', { for: 'acctName' }, 'Display name'), nameInput, h('div', { class: 'pic-actions' }, h('button', { class: 'btn sm' }, 'Save name'), h('a', { class: 'btn sm', href: '/profile/edit', ...(inCall ? { target: '_blank', rel: 'noopener' } : {}) }, 'Edit details')));
     nameForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       msg.textContent = '';

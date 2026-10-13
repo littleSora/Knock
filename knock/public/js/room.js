@@ -1,4 +1,5 @@
 import { api, h, icon, renderCode, toast, errText, avatarEl, confirmDialog, flash, friendActions } from './common.js';
+import { safetyActions } from './safety.js';
 import { profileButton } from './account.js';
 import { mountRoomTools } from './topbar.js';
 
@@ -141,7 +142,13 @@ async function joinInner(nickname) {
   socket.on('room:peer-left', ({ id }) => { note(`${people.get(id) ?? 'Someone'} left`); people.delete(id); refreshOwners(); dropPeer(id); });
   socket.on('recap:item', (item) => { recap.set(item.id, item); renderRecap(); if ($('side').hidden || $('paneRecap').hidden) $('recapBtn').classList.add('on'); });
   socket.on('recap:removed', ({ id }) => { recap.delete(id); renderRecap(); });
-  socket.on('room:chat', ({ from, nickname: n, body }) => addChat(from === socket.id ? null : n, body, from === socket.id));
+  socket.on('room:chat', ({ from, nickname: n, body }) => { dropTyper(from); addChat(from === socket.id ? null : n, body, from === socket.id); });
+  socket.on('room:typing', ({ from, nickname: n, on }) => {
+    if (!share) return;
+    dropTyper(from, false);
+    if (on) typers.set(from, { name: n, timer: setTimeout(() => dropTyper(from), 5000) });
+    paintTypers();
+  });
   socket.on('disconnect', () => { if (!leaving) toast('Connection lost. Reload the page to rejoin.'); });
   socket.on('room:ended', () => { // the host ended the session for everyone
     teardown();
@@ -273,7 +280,28 @@ function wireControls() {
     const text = $('chatInput').value.trim();
     if (text) socket.emit('room:chat', text);
     $('chatInput').value = '';
+    stopTyping();
   });
+  // "Ana is typing…": sent at most every 2.5 s while typing, hidden by the others after 5 s of silence.
+  $('chatInput').addEventListener('input', () => {
+    if (!share) return;
+    if (!$('chatInput').value.trim()) return stopTyping();
+    if (Date.now() - typingSentAt > 2500) { typingSentAt = Date.now(); socket.emit('room:typing', true); }
+  });
+  $('chatInput').addEventListener('blur', stopTyping);
+}
+// People who keep typing indicators off in Settings neither send nor see them (guests have no setting, so they do both).
+let share = true;
+if (user) api('/api/me').then((r) => { share = r.user.share_activity; }).catch(() => {});
+window.addEventListener('activity-updated', (e) => { share = e.detail; if (!share) { stopTyping(); typers.forEach((t) => clearTimeout(t.timer)); typers.clear(); paintTypers(); } });
+let typingSentAt = 0;
+const typers = new Map(); // socket id -> { name, timer }
+function stopTyping() { if (typingSentAt) socket?.emit('room:typing', false); typingSentAt = 0; }
+function dropTyper(id, repaint = true) { const t = typers.get(id); if (t) clearTimeout(t.timer); typers.delete(id); if (repaint) paintTypers(); }
+function paintTypers() {
+  const names = [...typers.values()].map((t) => t.name);
+  const text = !share || !names.length ? '' : names.length === 1 ? `${names[0]} is typing` : names.length === 2 ? `${names[0]} and ${names[1]} are typing` : 'Several people are typing';
+  $('roomTyping').replaceChildren(...(text ? [h('span', { class: 'typing-dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')), text + '…'] : []));
 }
 function addChat(name, body, mine) {
   const log = $('chatLog');
@@ -344,14 +372,19 @@ async function openProfile({ name, handle, mine, avatarAt = null }) {
   if (!user) { body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Log in to see profiles and send friend requests.'), h('a', { class: 'btn primary', href: '/login?next=' + encodeURIComponent(location.pathname) }, 'Log in')); return; }
   body.replaceChildren(head(name), h('p', { class: 'hint' }, 'Loading…'));
   try {
-    const { user: p, relation } = await api('/api/users/' + encodeURIComponent(handle));
+    const { user: p, relation: first } = await api('/api/users/' + encodeURIComponent(handle));
     const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
-    body.replaceChildren(
+    // Opens in a new tab so you don't leave the call.
+    const fullProfile = () => h('div', { class: 'pic-actions' }, h('a', { class: 'btn primary sm', href: '/u/' + encodeURIComponent(p.handle), target: '_blank', rel: 'noopener' }, h('span', { class: 'btn-ic' }, icon('users', 16)), 'Full profile'));
+    const paint = (relation) => body.replaceChildren(
       head(p.display_name, '@' + p.handle, p.avatar_at),
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Display name'), h('dd', {}, p.display_name),
         h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
         h('dt', {}, 'Account created'), h('dd', {}, fmtDate(p.created_at))),
-      relation === 'self' || mine ? h('p', { class: 'hint' }, 'This is how other people see you.') : friendActions(p, relation));
+      ...(relation === 'self' || mine
+        ? [h('p', { class: 'hint' }, 'This is how other people see you.'), fullProfile()]
+        : [friendActions(p, relation, paint), fullProfile(), safetyActions(p, relation, { context: { type: 'call', id: sessionId }, onChange: paint })]));
+    paint(first);
   } catch { body.replaceChildren(head(name), h('p', { class: 'error' }, 'Couldn’t load this profile. Try again.')); }
 }

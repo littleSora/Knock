@@ -35,6 +35,11 @@ const ICONS = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/>',
   messages: '<path d="M3 4h12v9H8l-5 3Z"/><path d="M15 8h6v9l-3-2h-6v-2"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4Z"/><circle cx="12" cy="13" r="3.5"/>',
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  chevron: '<path d="M9 18l6-6-6-6"/>',
+  flag: '<path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
 };
 export function icon(name, size = 20) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -95,6 +100,15 @@ const MESSAGES = {
   not_group_creator: 'Only the person who created the group can remove people.',
   member_not_found: 'That person isn’t in the group any more.',
   request_not_found: 'That friend request is no longer there.',
+  unblock_first: 'You blocked this person. Unblock them first.',
+  cannot_contact: 'You can’t contact this person.',
+  cannot_join: 'You can’t join this call right now.',
+  cannot_add_member: 'You can’t add that person to this group.',
+  invalid_report: 'Pick a reason for the report and try again.',
+  details_required: 'Tell us a little about what happened.',
+  user_not_found: 'We can’t find that person.',
+  invalid_initial: 'The initial should be a single letter.',
+  invalid_birthday: 'Enter a real birthday that isn’t in the future.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
 
@@ -122,7 +136,7 @@ export function avatarEl({ handle, display_name: name, avatar_at: at } = {}, siz
 }
 
 /* ---------- friend requests: one set of buttons for every place a person's profile shows up ---------- */
-// relation: 'none' | 'outgoing' (you asked) | 'incoming' (they asked you) | 'friend'
+// relation: 'none' | 'outgoing' (you asked) | 'incoming' (they asked you) | 'friend' | 'blocked' (you blocked them)
 export function friendActions(p, relation, onChange) {
   const box = h('div', { class: 'friend-actions' });
   const go = async (call, next, message) => {
@@ -136,7 +150,10 @@ export function friendActions(p, relation, onChange) {
   };
   function paint() {
     const id = encodeURIComponent(p.id);
-    if (relation === 'friend') {
+    if (relation === 'blocked') {
+      box.replaceChildren(h('span', { class: 'friend-state' }, icon('ban', 18), 'You blocked this person'),
+        h('button', { class: 'btn sm', type: 'button', onclick: () => go(() => api(`/api/blocks/${id}`, { method: 'DELETE' }), 'none', `Unblocked ${p.display_name}.`) }, 'Unblock'));
+    } else if (relation === 'friend') {
       box.replaceChildren(h('span', { class: 'friend-state' }, icon('userCheck', 18), 'Friends'));
     } else if (relation === 'outgoing') {
       box.replaceChildren(h('span', { class: 'friend-state' }, 'Request sent'),

@@ -71,6 +71,7 @@ app.get('/', humanPage, view('index.html'));
 app.get('/login', humanPage, view('login.html'));
 app.get('/dashboard', humanPage, attachUser, needLogin, view('dashboard.html'));
 app.get('/settings', humanPage, attachUser, needLogin, view('settings.html'));
+app.get('/profile/edit', humanPage, attachUser, needLogin, view('profile-edit.html'));
 app.get('/s/:id', humanPage, view('room.html'));
 app.get('/u/:handle', humanPage, view('profile.html'));
 

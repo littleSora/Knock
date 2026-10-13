@@ -1,12 +1,13 @@
 import express, { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import crypto from 'node:crypto';
-import { db, createSession, sessionExists, sessionInfo } from './db.js';
+import { db, createSession, sessionExists, sessionInfo, hasBlocked, blockedEither, activityOn, shareActivity } from './db.js';
 import { requireUser as needUser } from './auth.js';
 import { normalizeSessionId, isSessionId, cleanName, cleanBody } from './util.js';
 import { isOnline, emitTo, roomCount } from './realtime.js';
 import { isProd } from './env.js';
 import { parseTheme } from '../public/js/theme-core.js';
+import { validateReport } from '../public/js/report-categories.js';
 
 export const api = Router();
 const DAY = 86_400_000;
@@ -60,7 +61,8 @@ api.get('/me', needUser, (req, res) => {
   const u = db
     .prepare(
       `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email, phone,
-         google_sub IS NOT NULL AS has_google, created_at, theme,
+         google_sub IS NOT NULL AS has_google, created_at, theme, chat_activity AS share_activity,
+         first_name, last_name, middle_initial, birthday, workplace, country,
          (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at
        FROM users WHERE id = ?`,
     )
@@ -68,7 +70,7 @@ api.get('/me', needUser, (req, res) => {
   let theme = null;
   try { theme = u.theme ? JSON.parse(u.theme) : null; } catch { /* ignore a bad stored value */ }
   delete u.theme;
-  res.json({ user: { ...u, has_google: !!u.has_google }, theme });
+  res.json({ user: { ...u, has_google: !!u.has_google, share_activity: !!u.share_activity }, theme });
 });
 
 // The look of the app is saved on the account so it follows the person to every device.
@@ -120,11 +122,51 @@ api.delete('/me/avatar', needUser, (req, res) => {
   res.json({ ok: true, avatar_at: null });
 });
 
+// One switch for "seen" receipts and typing indicators. Off means you neither send nor see them.
+api.put('/me/activity', needUser, (req, res) => {
+  const on = req.body?.on === true;
+  db.prepare('UPDATE users SET chat_activity = ? WHERE id = ?').run(on ? 1 : 0, req.user.id);
+  res.json({ ok: true, on });
+});
+
 api.patch('/me', needUser, (req, res) => {
   const name = cleanName(req.body?.display_name, 40);
   if (!name) return res.status(400).json({ error: 'invalid_name' });
   db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name, req.user.id);
   res.json({ ok: true, display_name: name });
+});
+
+// Profile details (display name + optional personal info). Everything except the display name may be left blank.
+const validBirthday = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  return y >= 1900 && t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d && t.getTime() <= Date.now() + DAY;
+};
+api.put('/me/details', needUser, (req, res) => {
+  const b = req.body ?? {};
+  const display_name = cleanName(b.display_name, 40);
+  if (!display_name) return res.status(400).json({ error: 'invalid_name' });
+  const first_name = cleanName(b.first_name, 40) || null;
+  const last_name = cleanName(b.last_name, 40) || null;
+  const workplace = cleanName(b.workplace, 80) || null;
+  const country = cleanName(b.country, 60) || null;
+  let middle_initial = null;
+  const rawInitial = String(b.middle_initial ?? '').trim();
+  if (rawInitial) {
+    if (!/^\p{L}\.?$/u.test(rawInitial)) return res.status(400).json({ error: 'invalid_initial' });
+    middle_initial = rawInitial[0].toUpperCase();
+  }
+  let birthday = null;
+  const rawBirthday = String(b.birthday ?? '').trim();
+  if (rawBirthday) {
+    if (!validBirthday(rawBirthday)) return res.status(400).json({ error: 'invalid_birthday' });
+    birthday = rawBirthday;
+  }
+  db.prepare('UPDATE users SET display_name = ?, first_name = ?, last_name = ?, middle_initial = ?, birthday = ?, workplace = ?, country = ? WHERE id = ?')
+    .run(display_name, first_name, last_name, middle_initial, birthday, workplace, country, req.user.id);
+  res.json({ ok: true, display_name, first_name, last_name, middle_initial, birthday, workplace, country });
 });
 
 /* ---------- dashboard ---------- */
@@ -193,16 +235,21 @@ api.get('/users/search', needUser, socialLimiter, (req, res) => {
   const q = String(req.query.q ?? '').trim().toLowerCase().replace(/[%_\\]/g, '');
   if (q.length < 2) return res.json({ users: [] });
   const users = db
-    .prepare('SELECT id, handle, display_name FROM users WHERE id <> ? AND (handle LIKE ? OR lower(display_name) LIKE ?) ORDER BY handle LIMIT 10')
-    .all(req.user.id, `${q}%`, `%${q}%`);
+    .prepare(
+      `SELECT id, handle, display_name FROM users
+       WHERE id <> ? AND (handle LIKE ? OR lower(display_name) LIKE ?)
+         AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = ? AND b.blocked_id = users.id) OR (b.blocker_id = users.id AND b.blocked_id = ?))
+       ORDER BY handle LIMIT 10`,
+    )
+    .all(req.user.id, `${q}%`, `%${q}%`, req.user.id, req.user.id);
   res.json({ users });
 });
 
 api.get('/users/:handle', needUser, (req, res) => {
   const user = db
-    .prepare('SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, created_at, (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at FROM users WHERE handle = ?')
+    .prepare('SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, created_at, first_name, last_name, middle_initial, birthday, workplace, country, (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at FROM users WHERE handle = ?')
     .get(String(req.params.handle).toLowerCase());
-  if (!user) return res.status(404).json({ error: 'user_not_found' });
+  if (!user || hasBlocked(user.id, req.user.id)) return res.status(404).json({ error: 'user_not_found' }); // blocked by them: looks the same as "no such person"
   const relation = relationTo(req.user.id, user.id);
   res.json({ user, isSelf: relation === 'self', isFriend: relation === 'friend', relation });
 });
@@ -214,6 +261,7 @@ const areFriends = (a, b) => !!db.prepare('SELECT 1 FROM friends WHERE user_id =
 const REREQUEST_AFTER = 7 * DAY; // after a decline, the same person can ask again once this has passed
 function relationTo(me, other) {
   if (me === other) return 'self';
+  if (hasBlocked(me, other)) return 'blocked'; // you blocked them (if they blocked you, the profile isn't served at all)
   if (areFriends(me, other)) return 'friend';
   if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?').get(me, other)) return 'outgoing'; // also shown if they declined, so a decline stays private
   if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ? AND declined_at IS NULL').get(other, me)) return 'incoming';
@@ -261,6 +309,8 @@ api.post('/friends/:id', needUser, socialLimiter, (req, res) => {
   const me = req.user.id;
   const id = targetUserId(req);
   if (id == null) return res.status(400).json({ error: 'invalid_user' });
+  if (hasBlocked(me, id)) return res.status(403).json({ error: 'unblock_first' });
+  if (hasBlocked(id, me)) return res.json({ ok: true, state: 'outgoing' }); // silently dropped, like a decline: they aren't pestered and you aren't told
   if (areFriends(me, id)) return res.json({ ok: true, state: 'friend' });
   if (db.prepare('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?').get(id, me)) {
     makeFriends(me, id);
@@ -323,6 +373,111 @@ api.delete('/friends/:id', needUser, (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---------- blocking ---------- */
+// Blocking is quiet: the other person gets no notice. It removes the friendship (both sides) and any pending requests,
+// and from then on they can't message you, send you requests, find you in search, open your profile or join a call you are in.
+// Their old messages stay in the database (reports may need them) but are hidden from your bell. Unblocking does NOT
+// bring a friendship back; you would have to send a new request.
+function blockUser(me, id) {
+  db.exec('BEGIN');
+  try {
+    db.prepare('INSERT OR IGNORE INTO blocks(blocker_id, blocked_id, created_at) VALUES (?,?,?)').run(me, id, Date.now());
+    db.prepare('DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)').run(me, id, id, me);
+    db.prepare('DELETE FROM friend_requests WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)').run(me, id, id, me);
+    db.prepare("DELETE FROM notifications WHERE type = 'friend_accepted' AND ((user_id = ? AND from_id = ?) OR (user_id = ? AND from_id = ?))").run(me, id, id, me);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  emitTo(id, 'friends:changed', {}); // looks exactly like being unfriended, which is all they learn
+  emitTo(me, 'friends:changed', {});
+}
+
+api.get('/blocks', needUser, (req, res) => {
+  const blocked = db
+    .prepare(
+      `SELECT u.id, u.handle, u.display_name, b.created_at, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at
+       FROM blocks b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ? ORDER BY b.created_at DESC LIMIT 500`,
+    )
+    .all(req.user.id);
+  res.json({ blocked });
+});
+
+api.post('/blocks/:id', needUser, socialLimiter, (req, res) => {
+  const id = targetUserId(req);
+  if (id == null) return res.status(400).json({ error: 'invalid_user' });
+  blockUser(req.user.id, id);
+  res.json({ ok: true });
+});
+
+api.delete('/blocks/:id', needUser, socialLimiter, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid_user' });
+  db.prepare('DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?').run(req.user.id, id);
+  res.json({ ok: true });
+});
+
+/* ---------- reporting ---------- */
+// The reporter picks a category (and usually a reason) from public/js/report-categories.js, may add details, and may
+// block at the same time. The reported person is never told. Where the report came from (a chat, a group, a call) is
+// checked against the database, and for chats and groups the latest messages are copied into the report as evidence.
+const EVIDENCE_MESSAGES = 20;
+function reportContext(me, target, ctx) {
+  const none = { type: 'profile', ref: null, evidence: null };
+  const type = ctx?.type;
+  if (type === 'dm') {
+    const rows = db
+      .prepare('SELECT from_id, body, created_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT ?')
+      .all(me, target, target, me, EVIDENCE_MESSAGES)
+      .reverse()
+      .map((m) => ({ from: m.from_id === me ? 'reporter' : 'reported', body: m.body, at: m.created_at }));
+    return { type: 'dm', ref: null, evidence: rows.length ? rows : null };
+  }
+  if (type === 'group') {
+    const gid = Number(ctx.id);
+    const mine = Number.isInteger(gid) && db.prepare('SELECT joined_at FROM group_members WHERE group_id = ? AND user_id = ?').get(gid, me);
+    if (!mine || !isMember(gid, target)) return none; // not a group they share: treat as a plain profile report
+    const rows = db
+      .prepare("SELECT from_id, body, created_at FROM group_messages WHERE group_id = ? AND kind = 'msg' AND created_at >= ? ORDER BY id DESC LIMIT ?")
+      .all(gid, mine.joined_at, EVIDENCE_MESSAGES)
+      .reverse()
+      .map((m) => ({ from: m.from_id === me ? 'reporter' : m.from_id === target ? 'reported' : 'other', body: m.body, at: m.created_at }));
+    return { type: 'group', ref: String(gid), evidence: rows.length ? rows : null };
+  }
+  if (type === 'call') {
+    const sid = normalizeSessionId(ctx.id);
+    const both = isSessionId(sid) && db.prepare('SELECT COUNT(DISTINCT user_id) AS n FROM call_log WHERE session_id = ? AND user_id IN (?, ?)').get(sid, me, target).n === 2;
+    return both ? { type: 'call', ref: sid, evidence: null } : none; // only calls you were both really in
+  }
+  return none;
+}
+
+api.post('/reports', needUser, limiter(10, 3_600_000), (req, res) => {
+  const me = req.user.id;
+  const target = Number(req.body?.userId);
+  if (!Number.isInteger(target) || target === me || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(target)) {
+    return res.status(400).json({ error: 'invalid_user' });
+  }
+  const picked = validateReport(req.body?.category, req.body?.reason);
+  if (!picked) return res.status(400).json({ error: 'invalid_report' });
+  const details = cleanBody(req.body?.details, 500);
+  if (picked.category.details === 'required' && details.length < 3) return res.status(400).json({ error: 'details_required' });
+
+  // Sending the same report twice in a day (double tap, second tab) records it once.
+  const dup = db
+    .prepare("SELECT 1 FROM reports WHERE reporter_id = ? AND reported_id = ? AND category = ? AND COALESCE(reason, '') = ? AND status = 'open' AND created_at > ?")
+    .get(me, target, picked.category.id, picked.reason?.id ?? '', Date.now() - DAY);
+  if (!dup) {
+    const c = reportContext(me, target, req.body?.context);
+    db.prepare('INSERT INTO reports(reporter_id, reported_id, category, reason, details, context_type, context_ref, evidence, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(me, target, picked.category.id, picked.reason?.id ?? null, details || null, c.type, c.ref, c.evidence ? JSON.stringify(c.evidence) : null, Date.now());
+  }
+  const blocked = req.body?.alsoBlock === true;
+  if (blocked) blockUser(me, target);
+  res.json({ ok: true, blocked });
+});
+
 /* ---------- messages + notifications ---------- */
 // Whether a message is "spam" is decided by the RECIPIENT's friend list, at read time.
 api.post('/messages', needUser, socialLimiter, (req, res) => {
@@ -331,6 +486,8 @@ api.post('/messages', needUser, socialLimiter, (req, res) => {
   if (!body || !Number.isInteger(to) || to === req.user.id || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(to)) {
     return res.status(400).json({ error: 'invalid_message' });
   }
+  if (hasBlocked(req.user.id, to)) return res.status(403).json({ error: 'unblock_first' });
+  if (hasBlocked(to, req.user.id)) return res.status(403).json({ error: 'cannot_contact' });
   const now = Date.now();
   const info = db.prepare('INSERT INTO messages(from_id, to_id, body, created_at) VALUES (?,?,?,?)').run(req.user.id, to, body, now);
   const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now };
@@ -343,11 +500,16 @@ api.post('/messages', needUser, socialLimiter, (req, res) => {
 api.get('/messages/with/:id', needUser, (req, res) => {
   const me = req.user.id;
   const other = Number(req.params.id);
+  const share = shareActivity(me, other);
   const messages = db
-    .prepare('SELECT id, from_id, to_id, body, created_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT 50')
+    .prepare('SELECT id, from_id, to_id, body, created_at, read_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT 50')
     .all(me, other, other, me)
-    .reverse();
-  db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL').run(Date.now(), me, other);
+    .reverse()
+    // "Seen" is only for my own messages, and only when both of us share it. Nobody's read time is shown for other people's messages.
+    .map(({ read_at, ...m }) => (m.from_id === me ? { ...m, read_at: share ? read_at : null } : m));
+  const now = Date.now();
+  const marked = db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL').run(now, me, other).changes;
+  if (marked && share) emitTo(other, 'dm:read', { by: me, at: now }); // their "Seen" appears live
   res.json({ messages });
 });
 
@@ -360,9 +522,10 @@ api.get('/notifications', needUser, (req, res) => {
          EXISTS (SELECT 1 FROM friends f WHERE f.user_id = ? AND f.friend_id = m.from_id) AS is_friend
        FROM messages m JOIN users u ON u.id = m.from_id
        WHERE m.id IN (SELECT MAX(id) FROM messages WHERE to_id = ? GROUP BY from_id)
+         AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = ? AND b.blocked_id = m.from_id)
        ORDER BY m.id DESC LIMIT 50`,
     )
-    .all(me, me, me);
+    .all(me, me, me, me);
   const inbox = threads.filter((t) => t.is_friend);
   const spam = threads.filter((t) => !t.is_friend);
   // Friend requests waiting for an answer (declined ones are hidden), and "accepted your request" notices.
@@ -400,10 +563,13 @@ api.post('/notifications/read', needUser, (req, res) => {
 api.post('/notifications/read-all', needUser, (req, res) => {
   const me = req.user.id;
   const now = Date.now();
+  const senders = db.prepare('SELECT DISTINCT from_id FROM messages WHERE to_id = ? AND read_at IS NULL').all(me).map((r) => r.from_id);
   db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND read_at IS NULL').run(now, me);
+  for (const from of senders) if (shareActivity(me, from)) emitTo(from, 'dm:read', { by: me, at: now });
   db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(now, me);
   db.prepare('UPDATE friend_requests SET seen_at = ? WHERE to_id = ? AND seen_at IS NULL').run(now, me);
   db.prepare('UPDATE group_members SET last_read_id = COALESCE((SELECT MAX(id) FROM group_messages x WHERE x.group_id = group_members.group_id), 0) WHERE user_id = ?').run(me);
+  for (const { group_id: gid } of db.prepare('SELECT group_id FROM group_members WHERE user_id = ?').all(me)) announceGroupRead(gid, me);
   emitTo(me, 'notif:new', { type: 'read_all' }); // keeps your other tabs in sync
   res.json({ ok: true });
 });
@@ -414,6 +580,7 @@ api.post('/notifications/read-all', needUser, (req, res) => {
 // People only see messages from after they joined (so someone added later doesn't read old conversations).
 const MAX_GROUP = 20;
 const isMember = (groupId, userId) => !!db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, userId);
+const anyBlockBetween = (as, bs) => as.some((a) => bs.some((b) => a !== b && blockedEither(a, b)));
 const memberIds = (groupId) => db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(groupId).map((r) => r.user_id);
 const groupFor = (req, res) => {
   const id = Number(req.params.id);
@@ -432,6 +599,25 @@ const markGroupRead = (groupId, userId) =>
   db
     .prepare('UPDATE group_members SET last_read_id = (SELECT COALESCE(MAX(id), 0) FROM group_messages WHERE group_id = ?) WHERE group_id = ? AND user_id = ?')
     .run(groupId, groupId, userId);
+
+// Tell the rest of the group how far this person has read, so "Seen by ..." updates live. Skipped if they turned it off,
+// and never sent to someone who is blocked either way.
+function announceGroupRead(groupId, userId) {
+  if (!activityOn(userId)) return;
+  const last = db.prepare('SELECT last_read_id FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, userId)?.last_read_id;
+  if (last == null) return;
+  const name = db.prepare('SELECT display_name FROM users WHERE id = ?').get(userId).display_name;
+  for (const id of memberIds(groupId)) if (id !== userId && !blockedEither(id, userId)) emitTo(id, 'group:read', { group_id: groupId, user_id: userId, name, last_read_id: last });
+}
+// How far each other member has read (null if they keep it private). Empty if you keep yours private.
+function groupReads(groupId, me) {
+  if (!activityOn(me)) return [];
+  return db
+    .prepare('SELECT u.id, u.display_name AS name, u.chat_activity AS on_, m.last_read_id FROM group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = ? AND m.user_id <> ?')
+    .all(groupId, me)
+    .filter((r) => !blockedEither(me, r.id))
+    .map((r) => ({ id: r.id, name: r.name, last_read_id: r.on_ ? r.last_read_id : null }));
+}
 
 // Groups with unread messages for the bell and the group rows. Your own messages and the "X left" notes never count.
 function unreadGroups(me) {
@@ -474,6 +660,7 @@ api.post('/groups', needUser, socialLimiter, (req, res) => {
   const ids = [...new Set((Array.isArray(req.body?.memberIds) ? req.body.memberIds : []).map(Number))].filter((n) => Number.isInteger(n) && n !== req.user.id);
   if (!name || !ids.length || ids.length + 1 > MAX_GROUP) return res.status(400).json({ error: 'invalid_group' });
   if (!ids.every((id) => areFriends(req.user.id, id))) return res.status(400).json({ error: 'not_a_friend' });
+  if (anyBlockBetween(ids, ids)) return res.status(400).json({ error: 'cannot_add_member' });
   const now = Date.now();
   let groupId;
   db.exec('BEGIN');
@@ -529,6 +716,7 @@ api.post('/groups/:id/members', needUser, socialLimiter, (req, res) => {
   if (!fresh.every((id) => areFriends(me, id))) return res.status(400).json({ error: 'not_a_friend' });
   if (current.size + fresh.length > MAX_GROUP) return res.status(400).json({ error: 'group_full' });
   if (!fresh.length) return res.json({ ok: true, added: 0 });
+  if (anyBlockBetween(fresh, [...current, ...fresh])) return res.status(400).json({ error: 'cannot_add_member' });
   const now = Date.now();
   db.exec('BEGIN');
   try {
@@ -584,6 +772,7 @@ api.post('/groups/:id/read', needUser, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
   markGroupRead(g.id, req.user.id);
+  announceGroupRead(g.id, req.user.id);
   res.json({ ok: true });
 });
 
@@ -599,7 +788,8 @@ api.get('/groups/:id/messages', needUser, (req, res) => {
     .all(g.id, g.joined_at)
     .reverse();
   markGroupRead(g.id, req.user.id);
-  res.json({ messages });
+  announceGroupRead(g.id, req.user.id);
+  res.json({ messages, reads: groupReads(g.id, req.user.id) });
 });
 
 api.post('/groups/:id/messages', needUser, socialLimiter, (req, res) => {

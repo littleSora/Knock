@@ -98,6 +98,15 @@ form .btn { margin-top: 1rem; }
 .msg.note { align-self: center; background: none; color: var(--mute); font-size: 0.85rem; }
 .msg a { color: inherit; font-weight: 600; }
 .msg .who { display: block; font-size: 0.78rem; font-weight: 600; opacity: 0.7; }
+.receipt { align-self: flex-end; margin-top: -0.2rem; font-size: 0.72rem; color: var(--mute); }
+.chat-status { min-height: 1.4rem; padding: 0 0.8rem 0.25rem; font-size: 0.8rem; color: var(--mute); display: flex; align-items: center; gap: 0.4rem; }
+.typing-dots { display: inline-flex; gap: 3px; }
+.typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--mute); animation: typing 1.1s infinite ease-in-out; }
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+.check-row { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; font-weight: 600; }
+.check-row input { width: 1.2rem; height: 1.2rem; accent-color: var(--pink); flex: none; }
 .chat-form { display: flex; gap: 0.5rem; padding: 0.6rem; border-top: 2px solid var(--ink); }
 .chat-form .btn { margin: 0; padding: 0.4rem 0.7rem; }
 
@@ -298,3 +307,27 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .chat-row .sub { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-row .sub.strong { font-weight: 700; color: var(--ink); }
 .chat-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem; }
+
+/* ---------- block + report ---------- */
+.safety-actions { display: flex; align-items: center; gap: 0.9rem; margin-top: 0.9rem; flex-wrap: wrap; }
+.safety-actions .link-btn { display: inline-flex; align-items: center; gap: 0.3rem; }
+.report-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.report-head h2 { flex: 1; text-align: center; font-size: 1.3rem; margin: 0; }
+.report-q { font-weight: 700; margin: 0.6rem 0 0.4rem; overflow-wrap: anywhere; }
+.report-list { list-style: none; margin: 0.4rem 0 0; padding: 0; }
+.report-opt { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.7rem 0.3rem; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--ink); font: 600 1rem var(--body); text-align: left; cursor: pointer; }
+.report-opt:hover, .report-opt:focus-visible { background: var(--paper); }
+.report-opt svg { flex: none; color: var(--mute); }
+.report-note { margin: 0.4rem 0 0.8rem; padding: 0.6rem 0.8rem; background: var(--yellow); color: var(--on-yellow); border: 2px solid var(--ink); border-radius: 12px; font-size: 0.92rem; }
+.report-check { display: flex; align-items: center; gap: 0.6rem; margin: 0.9rem 0 0.2rem; font-weight: 600; cursor: pointer; }
+.report-check input { width: auto; margin: 0; accent-color: var(--pink); }
+.report-done { display: grid; justify-items: center; text-align: center; gap: 0.3rem; padding-top: 0.6rem; }
+.report-done h3 { margin: 0.2rem 0 0; font-size: 1.3rem; }
+.report-done-ic { display: inline-grid; place-items: center; width: 3.4rem; height: 3.4rem; border-radius: 50%; background: var(--yellow); color: var(--on-yellow); border: 2px solid var(--ink); }
+.report-next { display: grid; justify-items: center; gap: 0.4rem; margin-top: 0.6rem; }
+.report-next .btn { margin: 0; }
+.blocked-row .name { font-weight: 600; }
+
+/* Edit profile details: first name · initial · last name on one row */
+.field-row { display: grid; grid-template-columns: 1fr 5rem 1fr; gap: 0 0.75rem; }
+@media (max-width: 30rem) { .field-row { grid-template-columns: 1fr 4rem; } .field-row > :last-child { grid-column: 1 / -1; } }
