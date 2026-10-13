@@ -1,8 +1,11 @@
-import { api, h, icon, errText, toast, avatarEl, openModal, confirmDialog, friendActions } from './common.js';
+import { api, h, icon, errText, toast, avatarEl, groupAvatarEl, openModal, confirmDialog, friendActions } from './common.js';
+import { REACTION_EMOJI, IMAGE_BODY } from './reactions.js';
+import { prepareChatImage, uploadChatImage, imageErrorText, imagePicker, openImageViewer, PICK_TYPES } from './chat-media.js';
+import { cropAvatar } from './cropper.js';
 import { safetyActions, openReport } from './safety.js';
 import { profileButton } from './account.js';
 
-const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0 };
+const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0, pickFor: null };
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtStamp = (ms) => `${fmtDate(ms)} at ${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 let bar, badgeEl, chatBadgeEl, panels, sock;
@@ -41,6 +44,9 @@ function wirePanels() {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
   connect();
 }
+// A message that is just this site's call link is a call invite: show "Call invite" in previews instead of the raw link.
+const isInvite = (b) => typeof b === 'string' && b.startsWith(location.origin + '/s/') && !/\s/.test(b);
+const previewText = (b) => (isInvite(b) ? 'Call invite' : b);
 // In a call, anything that would navigate (profiles, call invites) opens in a new tab so you never drop out of the call.
 const newTab = () => (S.inCall ? { target: '_blank', rel: 'noopener' } : {});
 
@@ -102,6 +108,7 @@ const countText = (n) => (n > 9 ? '9+' : String(n));
 const groupRow = (g) => {
   const n = groupUnread(g.id);
   return h('li', { class: 'row' },
+    groupAvatarEl(g, 34),
     h('button', { class: 'row-main', onclick: () => openGroupChat(g) }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.member_count} members`)),
     n ? h('span', { class: 'count-pill', role: 'img', 'aria-label': `${n} unread` }, countText(n)) : null);
 };
@@ -146,7 +153,7 @@ async function refreshNotif() {
   if (!panels.friends.hidden) renderFriends();
 }
 const threadRow = (t) => h('li', { class: 'row' },
-  h('button', { class: 'row-main', onclick: () => { t.unread = 0; paintBadge(); openChat(t); } }, h('span', { class: 'name' }, t.display_name), h('span', { class: 'sub' }, t.body)),
+  h('button', { class: 'row-main', onclick: () => { t.unread = 0; paintBadge(); openChat(t); } }, h('span', { class: 'name' }, t.display_name), h('span', { class: 'sub' }, previewText(t.body))),
   t.unread ? h('span', { class: 'dot new', role: 'img', 'aria-label': `${t.unread} unread` }) : null);
 // A friend request with Accept / Decline right in the bell.
 function requestRow(r) {
@@ -178,7 +185,7 @@ function renderNotif() {
       h('a', { class: 'row-main', href: '/u/' + a.handle, ...newTab() }, h('span', { class: 'name' }, `${a.display_name} accepted your friend request`), h('span', { class: 'sub' }, 'View profile')),
       a.read_at ? null : h('span', { class: 'dot new', role: 'img', 'aria-label': 'New' })));
     const groups = n.groups.map((g) => h('li', { class: 'row' },
-      h('button', { class: 'row-main', onclick: () => { g.unread = 0; S.notif.groups = S.notif.groups.filter((x) => x !== g); paintBadge(); openGroupChat(g); } }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.from_name}: ${g.body}`)),
+      h('button', { class: 'row-main', onclick: () => { g.unread = 0; S.notif.groups = S.notif.groups.filter((x) => x !== g); paintBadge(); openGroupChat(g); } }, h('span', { class: 'name' }, g.name), h('span', { class: 'sub' }, `${g.from_name}: ${previewText(g.body)}`)),
       h('span', { class: 'count-pill', role: 'img', 'aria-label': `${g.unread} unread` }, countText(g.unread))));
     const rows = [...requests, ...accepted, ...groups, ...n.inbox.filter((t) => t.unread > 0).map(threadRow)]; // read conversations live in Chats
     body = rows.length ? h('ul', { class: 'rows' }, rows) : h('p', { class: 'empty' }, 'Nothing new. Unread messages and friend requests show up here; read conversations are under Chats.');
@@ -206,15 +213,15 @@ const shortWhen = (ms) => {
 };
 const previewOf = (c) => {
   if (c.preview == null) return 'No messages yet';
-  const text = c.preview.startsWith(location.origin + '/s/') && !/\s/.test(c.preview) ? 'Call invite' : c.preview;
+  const text = previewText(c.preview);
   const who = c.type === 'group' ? (c.mine ? 'You: ' : `${c.from_name}: `) : c.mine ? 'You: ' : '';
   return who + text;
 };
 function chatRow(c) {
-  const open = () => (c.type === 'group' ? openGroupChat({ id: c.id, name: c.name }) : openChat({ id: c.id, handle: c.handle, display_name: c.display_name, avatar_at: c.avatar_at }));
+  const open = () => (c.type === 'group' ? openGroupChat({ id: c.id, name: c.name, avatar_at: c.avatar_at }) : openChat({ id: c.id, handle: c.handle, display_name: c.display_name, avatar_at: c.avatar_at }));
   const title = c.type === 'group' ? c.name : c.display_name;
   return h('li', { class: 'row' },
-    c.type === 'group' ? h('span', { class: 'pic', style: '--s:34px', 'aria-hidden': 'true' }, icon('users', 18)) : avatarEl(c, 34),
+    c.type === 'group' ? groupAvatarEl(c, 34) : avatarEl(c, 34),
     h('button', { class: 'row-main chat-row', onclick: open },
       h('span', { class: 'name' }, title, c.type === 'group' ? h('span', { class: 'sub', style: 'margin-left:.4rem' }, `${c.member_count} members`) : null),
       h('span', { class: 'sub' + (c.unread ? ' strong' : '') }, previewOf(c))),
@@ -236,14 +243,48 @@ function renderChats() {
 }
 
 /* ---------- direct-message dock ---------- */
+function imageEl(m) {
+  const src = `/api/chat-images/${m.image_id}`;
+  const img = h('img', { src, alt: 'Picture in the chat', draggable: 'false' });
+  img.addEventListener('load', () => { const l = document.getElementById('chat-list'); if (l && S.chatStuck) l.scrollTop = l.scrollHeight; }); // a late-loading picture shouldn't push the newest message out of view
+  return h('button', { class: 'chat-img', type: 'button', 'aria-label': 'Open picture', onclick: () => openImageViewer(src) }, img);
+}
+// Reaction chips under a message (tap one to add or remove yours) and a small button that opens the emoji row.
+function reactionsEl(m) {
+  const list = m.reactions || [];
+  const picking = S.pickFor === m.id;
+  const chips = list.map((r) => {
+    const mine = r.users.includes(S.meId);
+    return h('button', { class: 'react-chip' + (mine ? ' mine' : ''), type: 'button', 'aria-pressed': String(mine), 'aria-label': `${r.emoji} ${r.users.length}${mine ? ', you reacted' : ''}`, onclick: () => react(m, r.emoji) }, r.emoji, h('span', {}, String(r.users.length)));
+  });
+  const add = h('button', { class: 'react-add', type: 'button', 'aria-label': 'Add a reaction', 'aria-expanded': String(picking), onclick: () => { S.pickFor = picking ? null : m.id; renderChatList(false); } }, icon('smile', 15));
+  const pick = picking ? h('div', { class: 'react-pick', role: 'group', 'aria-label': 'Pick a reaction' }, REACTION_EMOJI.map((e) => h('button', { class: 'react-opt', type: 'button', 'aria-label': e, onclick: () => { S.pickFor = null; react(m, e); } }, e))) : null;
+  return h('div', { class: 'reacts' }, chips, add, pick);
+}
+async function react(m, emoji) {
+  const chat = S.chat;
+  if (!chat) return;
+  try {
+    const url = chat.group ? `/api/groups/${chat.group.id}/messages/${m.id}/react` : `/api/messages/${m.id}/react`;
+    m.reactions = (await api(url, { method: 'PUT', body: { emoji } })).reactions;
+    if (S.chat === chat) renderChatList(false);
+  } catch (err) { toast(errText(err)); }
+}
+// One message: the bubble (text and/or picture) plus its reactions.
+function bubbleEl(m, mine, content, who = null) {
+  const pic = !!m.image_id;
+  const caption = pic && m.body !== IMAGE_BODY ? m.body : null;
+  const bubble = h('div', { class: 'msg' + (mine ? ' mine' : '') + (pic ? ' has-img' : '') }, who, pic ? imageEl(m) : null, pic ? (caption ? h('span', { class: 'caption' }, caption) : null) : content);
+  return h('div', { class: 'msg-wrap' + (mine ? ' mine' : '') }, bubble, reactionsEl(m));
+}
 function msgEl(m, other) {
-  const isLink = m.body.startsWith(location.origin + '/s/') && !/\s/.test(m.body); // same-origin call invite
+  const isLink = isInvite(m.body) && !m.image_id; // same-origin call invite
   const here = S.inCall && isLink && m.body === `${location.origin}/s/${S.sessionId}`; // an invite to the call you're already in
   const mine = m.from_id !== other.id;
   let content = m.body;
   if (here) content = mine ? 'You invited them to this call' : 'Invited you to this call (you’re already in it)';
   else if (isLink) content = h('a', { href: m.body, rel: 'noopener', ...(S.inCall ? { target: '_blank' } : {}) }, mine ? 'Your call invite' : 'Join my call');
-  return h('div', { class: 'msg' + (mine ? ' mine' : '') }, content);
+  return bubbleEl(m, mine, content);
 }
 function appendMsg(m) {
   if (!S.chat || S.chat.messages.some((x) => x.id === m.id)) return;
@@ -267,7 +308,8 @@ function renderChatList(stick) {
   const r = last >= 0 ? receiptEl(msgs[last]) : null;
   if (r) els.splice(last + 1, 0, r);
   list.replaceChildren(...els);
-  if (stick || atBottom) list.scrollTop = list.scrollHeight;
+  S.chatStuck = !!(stick || atBottom);
+  if (S.chatStuck) list.scrollTop = list.scrollHeight;
 }
 function receiptEl(m) {
   if (!S.share) return null; // if you keep yours private you don't see anyone's either
@@ -312,13 +354,34 @@ function stopTyping() {
   if (S.typingSentAt && S.typingTarget && sock?.connected) sock.emit('typing', { ...S.typingTarget, on: false });
   S.typingSentAt = 0;
 }
-function closeChat() { stopTyping(); clearTyping(); S.chat = null; document.getElementById('chat-dock')?.remove(); }
+function closeChat() { stopTyping(); clearTyping(); S.chat = null; S.pickFor = null; document.getElementById('chat-dock')?.remove(); }
+
+// The picture button for a chat's message box. `send(blob, caption)` uploads and resolves with the new message; anything
+// typed in the box goes along as the caption.
+function picturePicker(input, send) {
+  let btn;
+  const [button, file] = imagePicker(async (f) => {
+    const caption = input.value.trim().slice(0, 500);
+    btn.disabled = true;
+    try {
+      const blob = await prepareChatImage(f);
+      const { message } = await send(blob, caption);
+      input.value = '';
+      stopTyping();
+      appendMsg(message);
+    } catch (err) { toast(imageErrorText(err) || errText(err)); }
+    finally { btn.disabled = false; }
+  });
+  btn = button;
+  return [button, file];
+}
 
 async function openChat(u, { focus = true } = {}) {
   if (focus) closePanels();
   const { messages } = await api('/api/messages/with/' + u.id);
   stopTyping();
   S.chat = { user: { id: u.id, display_name: u.display_name }, messages };
+  S.pickFor = null;
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${u.display_name}`, 'aria-label': 'Message', autocomplete: 'off' });
   const list = h('div', { class: 'chat-list', id: 'chat-list' });
@@ -330,7 +393,7 @@ async function openChat(u, { focus = true } = {}) {
     stopTyping();
     try { appendMsg((await api('/api/messages', { method: 'POST', body: { toId: u.id, body } })).message); }
     catch (err) { toast(errText(err)); input.value = body; }
-  } }, input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
+  } }, ...picturePicker(input, (blob, caption) => uploadChatImage(`/api/messages/image?toId=${u.id}${caption ? '&caption=' + encodeURIComponent(caption) : ''}`, blob)), input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Chat with ${u.display_name}` },
     h('header', {}, h('button', { class: 'name-btn', type: 'button', 'aria-haspopup': 'dialog', title: 'View profile', onclick: () => openProfileCard(u) }, u.display_name), h('span', { class: 'grow' }),
       h('button', { class: 'link-btn', onclick: () => inviteToCall(u) }, 'Invite to call'),
@@ -451,14 +514,36 @@ function openGroupCreate(first) {
 function groupMsgEl(m) {
   if (m.kind === 'system') return h('div', { class: 'msg note' }, m.body);
   const mine = m.from_id === S.meId;
-  return h('div', { class: 'msg' + (mine ? ' mine' : '') }, mine ? null : h('span', { class: 'who' }, m.from_name), m.body);
+  let content = m.body;
+  if (isInvite(m.body) && !m.image_id) { // a call started for the whole group
+    const here = S.inCall && m.body === `${location.origin}/s/${S.sessionId}`;
+    content = here ? (mine ? 'You invited the group to this call' : 'Invited the group to this call (you’re already in it)')
+      : h('a', { href: m.body, rel: 'noopener', ...(S.inCall ? { target: '_blank' } : {}) }, mine ? 'Your group call' : 'Join the group call');
+  }
+  return bubbleEl(m, mine, content, mine ? null : h('span', { class: 'who' }, m.from_name));
+}
+// One tap: start a call and send its link to every member. In a call already, it sends this call's link instead and keeps you here.
+let callingGroup = false;
+async function callGroup(g) {
+  if (callingGroup) return;
+  callingGroup = true;
+  try {
+    const send = (id) => api(`/api/groups/${g.id}/messages`, { method: 'POST', body: { body: `${location.origin}/s/${id}` } });
+    if (S.inCall) { await send(S.sessionId); toast(`Call link sent to ${g.name}`); return; }
+    const { id } = await api('/api/sessions', { method: 'POST' });
+    await send(id);
+    location.href = '/s/' + id;
+  } catch (e) { toast(errText(e)); }
+  finally { callingGroup = false; }
 }
 async function openGroupChat(g, { focus = true } = {}) {
   if (focus) closePanels();
   let messages, reads;
   try { ({ messages, reads } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
   stopTyping();
-  S.chat = { group: { id: g.id, name: g.name }, messages, reads: reads || [] };
+  const known = S.groups.find((x) => x.id === g.id);
+  S.chat = { group: { id: g.id, name: g.name, avatar_at: g.avatar_at ?? known?.avatar_at ?? null }, messages, reads: reads || [] };
+  S.pickFor = null;
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${g.name}`, 'aria-label': 'Message the group', autocomplete: 'off', id: 'group-input' });
   const list = h('div', { class: 'chat-list', id: 'chat-list' });
@@ -470,9 +555,11 @@ async function openGroupChat(g, { focus = true } = {}) {
     stopTyping();
     try { appendMsg((await api(`/api/groups/${g.id}/messages`, { method: 'POST', body: { body } })).message); }
     catch (err) { toast(errText(err)); input.value = body; }
-  } }, input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
+  } }, ...picturePicker(input, (blob, caption) => uploadChatImage(`/api/groups/${g.id}/messages/image${caption ? '?caption=' + encodeURIComponent(caption) : ''}`, blob)), input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Group chat ${g.name}` },
-    h('header', {}, h('button', { class: 'name-btn', id: 'group-title', type: 'button', 'aria-haspopup': 'dialog', title: 'Group info', onclick: () => openGroupInfo(S.chat.group) }, g.name), h('span', { class: 'grow' }),
+    h('header', {}, h('span', { id: 'group-pic' }, groupAvatarEl(S.chat.group, 28)),
+      h('button', { class: 'name-btn', id: 'group-title', type: 'button', 'aria-haspopup': 'dialog', title: 'Group info', onclick: () => openGroupInfo(S.chat.group) }, g.name), h('span', { class: 'grow' }),
+      h('button', { class: 'btn primary sm call-group', type: 'button', title: 'Start a call and send the link to everyone in this group', onclick: () => callGroup(S.chat.group) }, h('span', { class: 'btn-ic' }, icon('video', 16)), 'Call group'),
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
     list, h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
   wireTyping(input, { group_id: g.id });
@@ -529,9 +616,46 @@ async function openGroupInfo(g) {
       try { await api(`/api/groups/${group.id}/members/${S.meId}`, { method: 'DELETE' }); m.close(); dropGroup(group.id); toast(`You left “${group.name}”`); }
       catch (err) { msg.textContent = errText(err); }
     };
+    // Group picture: same cropper and rules as profile pictures. Any member can change it.
+    const picMsg = h('p', { class: 'error', role: 'alert' });
+    const picFile = h('input', { type: 'file', accept: PICK_TYPES.join(','), hidden: true, 'aria-label': 'Choose a group picture' });
+    const change = h('button', { class: 'btn sm', type: 'button', 'data-autofocus': '' }, h('span', { class: 'btn-ic' }, icon('camera', 16)), group.avatar_at ? 'Change picture' : 'Add a picture');
+    change.addEventListener('click', () => picFile.click());
+    const removePic = group.avatar_at ? h('button', { class: 'link-btn danger', type: 'button' }, 'Remove') : null;
+    picFile.addEventListener('change', async () => {
+      const f = picFile.files[0];
+      picFile.value = '';
+      picMsg.textContent = '';
+      if (!f) return;
+      if (!PICK_TYPES.includes(f.type)) { picMsg.textContent = 'Pick a PNG, JPG, WebP or GIF picture.'; return; }
+      if (f.size > 3 * 1024 * 1024) { picMsg.textContent = `That file is ${(f.size / 1024 / 1024).toFixed(1)} MB. Pick one that’s 3 MB or smaller.`; return; }
+      let blob;
+      try { blob = await cropAvatar(f, { subject: 'group picture', hint: 'Move and zoom so the picture sits inside the circle. Everything outside it is cut off.' }); } catch { picMsg.textContent = 'We couldn’t open that picture. Try a different one.'; return; }
+      if (!blob) return; // cancelled
+      change.disabled = true;
+      try {
+        const r = await uploadChatImage(`/api/groups/${group.id}/avatar`, blob, 'PUT');
+        group.avatar_at = r.avatar_at;
+        applyGroupAvatar(group.id, r.avatar_at);
+        toast('Group picture updated');
+        render();
+      } catch (err) { change.disabled = false; picMsg.textContent = errText(err); }
+    });
+    removePic?.addEventListener('click', async () => {
+      try {
+        await api(`/api/groups/${group.id}/avatar`, { method: 'DELETE' });
+        group.avatar_at = null;
+        applyGroupAvatar(group.id, null);
+        toast('Group picture removed');
+        render();
+      } catch (err) { picMsg.textContent = errText(err); }
+    });
     body.replaceChildren(
-      h('h2', { style: 'font-size:1.6rem;margin-top:.2rem' }, group.name),
-      h('p', { class: 'sub' }, `Created ${fmtStamp(group.created_at)}`),
+      h('div', { class: 'profile-head', style: 'margin-top:0' },
+        groupAvatarEl(group, 88),
+        h('div', {}, h('h2', { style: 'font-size:1.6rem' }, group.name), h('p', { class: 'sub' }, `Created ${fmtStamp(group.created_at)}`),
+          h('div', { class: 'pic-actions' }, change, removePic))),
+      picFile, picMsg,
       h('h3', {}, `Members (${members.length})`),
       h('ul', { class: 'rows' }, members.map((u) => h('li', { class: 'row' },
         avatarEl(u, 34),
@@ -573,6 +697,18 @@ function dropGroup(id) {
   if (S.groupInfo?.id === id) S.groupInfo.modal.close();
   renderFriends();
   refreshNotif();
+}
+function applyGroupAvatar(id, at) {
+  const g = S.groups.find((x) => x.id === id);
+  if (g) g.avatar_at = at;
+  const c = S.chats.find((x) => x.type === 'group' && x.id === id);
+  if (c) c.avatar_at = at;
+  if (S.chat?.group?.id === id) {
+    S.chat.group.avatar_at = at;
+    document.getElementById('group-pic')?.replaceChildren(groupAvatarEl(S.chat.group, 28));
+  }
+  renderFriends();
+  if (!panels.chats.hidden) renderChats();
 }
 function applyGroupName(id, name) {
   const g = S.groups.find((x) => x.id === id);
@@ -647,6 +783,16 @@ function connect() {
     }
   });
   socket.on('group:renamed', ({ group_id: gid, name }) => applyGroupName(gid, name));
+  socket.on('group:avatar', ({ group_id: gid, avatar_at: at }) => applyGroupAvatar(gid, at));
+  // Someone reacted (or took a reaction back) in a chat: update that message if it's on screen.
+  socket.on('reaction:update', ({ kind, group_id: gid, message_id: mid, reactions }) => {
+    const c = S.chat;
+    if (!c || (kind === 'group' ? c.group?.id !== gid : !!c.group)) return;
+    const m = c.messages.find((x) => x.id === mid);
+    if (!m) return;
+    m.reactions = reactions;
+    renderChatList(false);
+  });
   socket.on('group:members', ({ group_id: gid }) => { refreshGroups(); if (S.groupInfo?.id === gid) S.groupInfo.reload(); });
   socket.on('group:removed', ({ group_id: gid, group_name: gname, left }) => {
     if (!S.groups.some((g) => g.id === gid)) return; // already handled in this tab

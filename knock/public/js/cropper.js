@@ -6,7 +6,7 @@ const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
 // Opens a crop dialog for an image file. Resolves with a JPEG Blob (256x256) or null if cancelled.
 // The picture is drawn inside a circle so people can see exactly what will fit the round profile picture.
-export async function cropAvatar(file) {
+export async function cropAvatar(file, { subject = 'picture', hint = 'Move and zoom so your face sits inside the circle. Everything outside it is cut off.' } = {}) {
   let bmp;
   try { bmp = await createImageBitmap(file); } catch { throw Object.assign(new Error('unreadable'), { code: 'unreadable' }); }
   if (!bmp.width || !bmp.height) { bmp.close?.(); throw Object.assign(new Error('unreadable'), { code: 'unreadable' }); }
@@ -90,9 +90,9 @@ export async function cropAvatar(file) {
       o.drawImage(bmp, -ox / s, -oy / s, SIZE / s, SIZE / s, 0, 0, OUT, OUT);
       out.toBlob((blob) => { result = blob; m.close(); }, 'image/jpeg', 0.9);
     });
-    const m = openModal({ label: 'Crop your profile picture', onClose: () => { bmp.close?.(); resolve(result); } },
-      h('h2', { style: 'font-size:1.5rem;margin-top:.4rem' }, 'Crop your picture'),
-      h('p', { class: 'hint' }, 'Move and zoom so your face sits inside the circle. Everything outside it is cut off.'),
+    const m = openModal({ label: `Crop your ${subject}`, onClose: () => { bmp.close?.(); resolve(result); } },
+      h('h2', { style: 'font-size:1.5rem;margin-top:.4rem' }, `Crop your ${subject}`),
+      h('p', { class: 'hint' }, hint),
       h('div', { class: 'crop-wrap' }, canvas),
       h('label', { style: 'margin-top:.6rem' }, 'Zoom', slider),
       h('div', { class: 'dialog-actions' }, cancel, save));

@@ -28,12 +28,11 @@ if (!user) {
     const details = facts.length
       ? h('dl', { class: 'facts-list' }, facts.map(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))
       : isSelf ? h('p', { class: 'hint' }, 'You haven’t added any details yet.') : null;
-    const editLink = isSelf ? h('a', { class: 'btn sm', href: '/profile/edit' }, 'Edit details') : null;
 
     const paint = (relation) => view.replaceChildren(
       h('div', { class: 'profile-head' }, avatarEl(p, 80),
         h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle)), h('span', { class: 'grow' }), isSelf ? null : friendActions(p, relation, paint)),
-      ...[details, editLink].filter(Boolean),
+      ...(details ? [details] : []),
       ...(isSelf ? [h('p', { class: 'lede' }, 'This is how other people see you.')]
         : [relation === 'blocked' ? h('p', { class: 'lede' }, `You blocked ${p.display_name}, so you can’t message each other. Unblock them to talk again.`) : form,
           safetyActions(p, relation, { onChange: paint })]));

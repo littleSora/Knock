@@ -328,6 +328,36 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .report-next .btn { margin: 0; }
 .blocked-row .name { font-weight: 600; }
 
-/* Edit profile details: first name · initial · last name on one row */
-.field-row { display: grid; grid-template-columns: 1fr 5rem 1fr; gap: 0 0.75rem; }
-@media (max-width: 30rem) { .field-row { grid-template-columns: 1fr 4rem; } .field-row > :last-child { grid-column: 1 / -1; } }
+/* Settings → Profile details: grouped, with room between fields */
+.detail-form .detail-group { margin-top: 1.75rem; }
+.detail-form h3 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1.5rem; }
+.detail-grid .wide { grid-column: 1 / -1; }
+.detail-cell label { margin-top: 0.6rem; }
+.detail-cell .hint { margin: 0.35rem 0 0; }
+@media (max-width: 34rem) { .detail-grid { grid-template-columns: 1fr; } }
+
+/* Chat pictures, emoji reactions, group call button */
+.msg-wrap { align-self: flex-start; max-width: 85%; display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem; }
+.msg-wrap.mine { align-self: flex-end; align-items: flex-end; }
+.msg-wrap .msg { align-self: auto; max-width: 100%; }
+.msg.has-img { padding: 0.25rem; }
+.msg.has-img .who { padding: 0.15rem 0.45rem 0; }
+.msg .caption { display: block; padding: 0.3rem 0.45rem 0.15rem; }
+.chat-img { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; border-radius: 9px; overflow: hidden; }
+.chat-img img { display: block; max-width: 100%; width: auto; height: auto; max-height: 14rem; border-radius: 9px; }
+.reacts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; }
+.msg-wrap.mine .reacts { justify-content: flex-end; }
+.react-chip { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.05rem 0.5rem; font: 600 0.8rem var(--body); color: var(--ink); background: var(--card); border: 1.5px solid var(--ink); border-radius: 999px; cursor: pointer; }
+.react-chip.mine { background: var(--yellow); color: var(--on-yellow); }
+.react-add { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; padding: 0; color: var(--mute); background: none; border: 0; border-radius: 50%; cursor: pointer; opacity: 0.6; }
+.react-add:hover, .react-add:focus-visible, .react-add[aria-expanded='true'] { opacity: 1; color: var(--ink); background: var(--paper); }
+.react-pick { flex-basis: 100%; display: flex; gap: 0.15rem; padding: 0.2rem 0.3rem; background: var(--card); border: 2px solid var(--ink); border-radius: 999px; box-shadow: 2px 2px 0 var(--ink); }
+.msg-wrap.mine .react-pick { justify-content: flex-end; }
+.react-opt { font-size: 1.15rem; line-height: 1; padding: 0.2rem; background: none; border: 0; border-radius: 8px; cursor: pointer; }
+.react-opt:hover, .react-opt:focus-visible { background: var(--paper); }
+.chat-form .chat-img-btn { width: 2.3rem; height: 2.3rem; flex: none; margin: 0; }
+.chat-form .chat-img-btn:disabled { opacity: 0.5; cursor: progress; }
+.viewer-img { display: block; max-width: 100%; max-height: 75vh; margin: 0.5rem auto 0; border-radius: 10px; }
+.chat-dock > header .call-group { margin: 0; display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+.chat-dock > header #group-title { max-width: 6.5rem; }

@@ -72,21 +72,6 @@ async function openAccount(user) {
       } catch (err) { msg.textContent = errText(err); }
     });
 
-    const nameInput = h('input', { id: 'acctName', maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name });
-    const nameForm = h('form', {}, h('label', { for: 'acctName' }, 'Display name'), nameInput, h('div', { class: 'pic-actions' }, h('button', { class: 'btn sm' }, 'Save name'), h('a', { class: 'btn sm', href: '/profile/edit', ...(inCall ? { target: '_blank', rel: 'noopener' } : {}) }, 'Edit details')));
-    nameForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      msg.textContent = '';
-      try {
-        const r = await api('/api/me', { method: 'PATCH', body: { display_name: nameInput.value } });
-        me.display_name = r.display_name;
-        user.display_name = r.display_name;
-        announce();
-        toast(location.pathname.startsWith('/s/') ? 'Name saved. People already in this call will see it next time you join.' : 'Name saved');
-        render();
-      } catch (err) { msg.textContent = errText(err); }
-    });
-
     const methods = [me.has_google && 'Google', me.email && 'Email code', me.phone && 'Phone code'].filter(Boolean).join(', ') || 'n/a';
     const na = (v) => v || 'n/a';
     body.replaceChildren(
@@ -97,7 +82,6 @@ async function openAccount(user) {
       file,
       h('p', { class: 'hint' }, 'PNG, JPG, WebP or GIF, up to 3 MB. You’ll crop it to fit the circle.'),
       msg,
-      nameForm,
       h('h3', {}, 'Account'),
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Username'), h('dd', {}, '@' + me.handle),

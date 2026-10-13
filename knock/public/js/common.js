@@ -40,6 +40,8 @@ const ICONS = {
   flag: '<path d="M5 21V4"/><path d="M5 4h12l-2.5 4L17 12H5"/>',
   ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="9.5" r="1.7"/><path d="m21 16-5.5-5.5L7 19"/>',
+  smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.2s1.2 1.8 3.5 1.8 3.5-1.8 3.5-1.8M9.2 9.6h.01M14.8 9.6h.01"/>',
 };
 export function icon(name, size = 20) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -95,7 +97,7 @@ const MESSAGES = {
   not_a_friend: 'You can only add people who are on your friend list.',
   group_not_found: 'That group isn’t available any more.',
   invalid_message: 'Type a message first.',
-  invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG or WebP.',
+  invalid_image: 'That file isn’t a picture we can use. Try a PNG, JPG, WebP or GIF.',
   group_full: 'That group is full.',
   not_group_creator: 'Only the person who created the group can remove people.',
   member_not_found: 'That person isn’t in the group any more.',
@@ -107,6 +109,8 @@ const MESSAGES = {
   invalid_report: 'Pick a reason for the report and try again.',
   details_required: 'Tell us a little about what happened.',
   user_not_found: 'We can’t find that person.',
+  invalid_reaction: 'That reaction isn’t available.',
+  message_not_found: 'That message isn’t available any more.',
   invalid_initial: 'The initial should be a single letter.',
   invalid_birthday: 'Enter a real birthday that isn’t in the future.',
 };
@@ -131,6 +135,17 @@ export function avatarEl({ handle, display_name: name, avatar_at: at } = {}, siz
   if (handle && at) {
     const img = h('img', { src: avatarUrl(handle, at), alt: '', draggable: 'false' });
     img.addEventListener('load', () => el.replaceChildren(img)); // keep the letter until the picture has loaded
+  }
+  return el;
+}
+
+// A group's picture if it has one, otherwise the people icon. Only group members can load it (the server checks).
+export const groupAvatarUrl = (id, at) => `/api/groups/${encodeURIComponent(id)}/avatar?v=${at}`;
+export function groupAvatarEl({ id, avatar_at: at } = {}, size = 40) {
+  const el = h('span', { class: 'pic', style: `--s:${size}px`, 'aria-hidden': 'true' }, icon('users', Math.round(size * 0.5)));
+  if (id && at) {
+    const img = h('img', { src: groupAvatarUrl(id, at), alt: '', draggable: 'false' });
+    img.addEventListener('load', () => el.replaceChildren(img)); // keep the icon until the picture has loaded
   }
   return el;
 }

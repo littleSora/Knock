@@ -8,6 +8,8 @@ import { isOnline, emitTo, roomCount } from './realtime.js';
 import { isProd } from './env.js';
 import { parseTheme } from '../public/js/theme-core.js';
 import { validateReport } from '../public/js/report-categories.js';
+import { IMAGE_BODY } from '../public/js/reactions.js';
+import { isReactionEmoji, sniffImage, saveChatImage, canSeeImage, loadReactions, toggleReaction } from './chat-extras.js';
 
 export const api = Router();
 const DAY = 86_400_000;
@@ -101,12 +103,10 @@ api.patch('/me/username', needUser, limiter(5, 3_600_000), (req, res) => {
 // so what arrives here is small. We accept only real PNG/JPEG/WebP bytes (never SVG) and cap the size.
 const MAX_AVATAR = 512 * 1024;
 const rawImage = express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: MAX_AVATAR });
-function sniffImage(b) {
-  if (b.length > 12 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
-  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
-  if (b.length > 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return null;
-}
+// Pictures sent in chats: the browser shrinks them to at most 1280 px first, so 1.5 MB is generous.
+const MAX_CHAT_IMAGE = 1.5 * 1024 * 1024;
+const rawChatImage = express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: MAX_CHAT_IMAGE });
+const parseChatImage = (req, res, next) => rawChatImage(req, res, (err) => (err ? res.status(413).json({ error: 'image_too_large' }) : next()));
 api.put('/me/avatar', needUser, limiter(10), (req, res, next) => rawImage(req, res, (err) => (err ? res.status(413).json({ error: 'image_too_large' }) : next())), (req, res) => {
   const mime = Buffer.isBuffer(req.body) ? sniffImage(req.body) : null;
   if (!mime) return res.status(400).json({ error: 'invalid_image' });
@@ -480,21 +480,60 @@ api.post('/reports', needUser, limiter(10, 3_600_000), (req, res) => {
 
 /* ---------- messages + notifications ---------- */
 // Whether a message is "spam" is decided by the RECIPIENT's friend list, at read time.
-api.post('/messages', needUser, socialLimiter, (req, res) => {
-  const to = Number(req.body?.toId);
-  const body = cleanBody(req.body?.body, 2000);
-  if (!body || !Number.isInteger(to) || to === req.user.id || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(to)) {
-    return res.status(400).json({ error: 'invalid_message' });
-  }
-  if (hasBlocked(req.user.id, to)) return res.status(403).json({ error: 'unblock_first' });
-  if (hasBlocked(to, req.user.id)) return res.status(403).json({ error: 'cannot_contact' });
+// Can I message this person? (Sends the error reply itself and returns false if not.)
+function dmAllowed(req, res, to) {
+  if (!Number.isInteger(to) || to === req.user.id || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(to)) { res.status(400).json({ error: 'invalid_message' }); return false; }
+  if (hasBlocked(req.user.id, to)) { res.status(403).json({ error: 'unblock_first' }); return false; }
+  if (hasBlocked(to, req.user.id)) { res.status(403).json({ error: 'cannot_contact' }); return false; }
+  return true;
+}
+function deliverDm(req, res, to, body, imageId = null) {
   const now = Date.now();
-  const info = db.prepare('INSERT INTO messages(from_id, to_id, body, created_at) VALUES (?,?,?,?)').run(req.user.id, to, body, now);
-  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now };
+  const info = db.prepare('INSERT INTO messages(from_id, to_id, body, created_at, image_id) VALUES (?,?,?,?,?)').run(req.user.id, to, body, now, imageId);
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now, image_id: imageId, reactions: [] };
   const spam = !db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(to, req.user.id);
   emitTo(to, 'dm:new', { ...message, from: req.user, spam });
   emitTo(req.user.id, 'dm:echo', message); // keeps the sender's other tabs in sync
   res.json({ message });
+}
+api.post('/messages', needUser, socialLimiter, (req, res) => {
+  const to = Number(req.body?.toId);
+  const body = cleanBody(req.body?.body, 2000);
+  if (!body) return res.status(400).json({ error: 'invalid_message' });
+  if (!dmAllowed(req, res, to)) return;
+  deliverDm(req, res, to, body);
+});
+// A picture (raw image bytes in the body; ?toId=… and an optional ?caption=…).
+api.post('/messages/image', needUser, limiter(20), parseChatImage, (req, res) => {
+  const to = Number(req.query.toId);
+  const mime = sniffImage(req.body);
+  if (!mime) return res.status(400).json({ error: 'invalid_image' });
+  if (!dmAllowed(req, res, to)) return;
+  deliverDm(req, res, to, cleanBody(req.query.caption, 500) || IMAGE_BODY, saveChatImage(req.user.id, mime, req.body));
+});
+
+// Tap an emoji to react, tap it again to take it back. Both people in the chat are told live.
+api.put('/messages/:id/react', needUser, limiter(60), (req, res) => {
+  const me = req.user.id;
+  const id = Number(req.params.id);
+  const emoji = String(req.body?.emoji ?? '');
+  if (!isReactionEmoji(emoji)) return res.status(400).json({ error: 'invalid_reaction' });
+  const m = Number.isInteger(id) ? db.prepare('SELECT from_id, to_id FROM messages WHERE id = ?').get(id) : null;
+  if (!m || (m.from_id !== me && m.to_id !== me)) return res.status(404).json({ error: 'message_not_found' });
+  const other = m.from_id === me ? m.to_id : m.from_id;
+  if (blockedEither(me, other)) return res.status(403).json({ error: 'cannot_contact' });
+  toggleReaction('dm', id, me, emoji);
+  for (const uid of [me, other]) emitTo(uid, 'reaction:update', { kind: 'dm', message_id: id, reactions: loadReactions('dm', [id], uid).get(id) ?? [] });
+  res.json({ reactions: loadReactions('dm', [id], me).get(id) ?? [] });
+});
+
+// Chat pictures are only served to people who are in the chat they were sent in.
+api.get('/chat-images/:id', needUser, (req, res) => {
+  const id = Number(req.params.id);
+  const row = Number.isInteger(id) && canSeeImage(id, req.user.id) ? db.prepare('SELECT mime, data FROM chat_images WHERE id = ?').get(id) : null;
+  if (!row) return res.status(404).end();
+  res.set({ 'Content-Type': row.mime, 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" });
+  res.send(Buffer.from(row.data));
 });
 
 api.get('/messages/with/:id', needUser, (req, res) => {
@@ -502,11 +541,13 @@ api.get('/messages/with/:id', needUser, (req, res) => {
   const other = Number(req.params.id);
   const share = shareActivity(me, other);
   const messages = db
-    .prepare('SELECT id, from_id, to_id, body, created_at, read_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT 50')
+    .prepare('SELECT id, from_id, to_id, body, created_at, read_at, image_id FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT 50')
     .all(me, other, other, me)
     .reverse()
     // "Seen" is only for my own messages, and only when both of us share it. Nobody's read time is shown for other people's messages.
     .map(({ read_at, ...m }) => (m.from_id === me ? { ...m, read_at: share ? read_at : null } : m));
+  const rx = loadReactions('dm', messages.map((m) => m.id), me);
+  for (const m of messages) m.reactions = rx.get(m.id) ?? [];
   const now = Date.now();
   const marked = db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL').run(now, me, other).changes;
   if (marked && share) emitTo(other, 'dm:read', { by: me, at: now }); // their "Seen" appears live
@@ -587,7 +628,7 @@ const groupFor = (req, res) => {
   const g = Number.isInteger(id)
     ? db
         .prepare(
-          `SELECT g.id, g.name, g.created_by, g.created_at, m.joined_at FROM group_chats g
+          `SELECT g.id, g.name, g.created_by, g.created_at, m.joined_at, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at FROM group_chats g
            JOIN group_members m ON m.group_id = g.id AND m.user_id = ? WHERE g.id = ?`,
         )
         .get(req.user.id, id)
@@ -645,7 +686,7 @@ const joinList = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')
 api.get('/groups', needUser, (req, res) => {
   const groups = db
     .prepare(
-      `SELECT g.id, g.name, g.created_by, g.created_at,
+      `SELECT g.id, g.name, g.created_by, g.created_at, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at,
          (SELECT COUNT(*) FROM group_members x WHERE x.group_id = g.id) AS member_count
        FROM group_chats g JOIN group_members m ON m.group_id = g.id
        WHERE m.user_id = ? ORDER BY g.created_at DESC`,
@@ -673,7 +714,7 @@ api.post('/groups', needUser, socialLimiter, (req, res) => {
     db.exec('ROLLBACK');
     throw e;
   }
-  const group = { id: groupId, name, created_by: req.user.id, created_at: now, member_count: ids.length + 1 };
+  const group = { id: groupId, name, created_by: req.user.id, created_at: now, avatar_at: null, member_count: ids.length + 1 };
   for (const id of ids) emitTo(id, 'group:new', { group, by: req.user.display_name });
   res.json({ group });
 });
@@ -691,6 +732,39 @@ api.get('/groups/:id', needUser, (req, res) => {
     .map((u) => ({ ...u, is_creator: u.id === g.created_by }));
   const { joined_at, ...group } = g;
   res.json({ group, members });
+});
+
+// The group picture: any member can set or remove it (like renaming). Same cropper and limits as profile pictures.
+api.get('/groups/:id/avatar', needUser, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const row = db.prepare('SELECT mime, data FROM group_avatars WHERE group_id = ?').get(g.id);
+  if (!row) return res.status(404).end();
+  res.set({ 'Content-Type': row.mime, 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+  res.send(Buffer.from(row.data));
+});
+const announceGroupPicture = (g, req, avatarAt, text) => {
+  for (const id of memberIds(g.id)) emitTo(id, 'group:avatar', { group_id: g.id, avatar_at: avatarAt });
+  groupNote(g, req.user.id, `${req.user.display_name} ${text}`);
+};
+api.put('/groups/:id/avatar', needUser, limiter(10), (req, res, next) => rawImage(req, res, (err) => (err ? res.status(413).json({ error: 'image_too_large' }) : next())), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const mime = sniffImage(req.body);
+  if (!mime) return res.status(400).json({ error: 'invalid_image' });
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO group_avatars(group_id, mime, data, updated_at) VALUES (?,?,?,?)
+     ON CONFLICT(group_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`,
+  ).run(g.id, mime, req.body, now);
+  announceGroupPicture(g, req, now, 'changed the group picture');
+  res.json({ ok: true, avatar_at: now });
+});
+api.delete('/groups/:id/avatar', needUser, limiter(10), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  if (db.prepare('DELETE FROM group_avatars WHERE group_id = ?').run(g.id).changes) announceGroupPicture(g, req, null, 'removed the group picture');
+  res.json({ ok: true, avatar_at: null });
 });
 
 // Any member can rename the group.
@@ -729,7 +803,7 @@ api.post('/groups/:id/members', needUser, socialLimiter, (req, res) => {
     throw e;
   }
   const names = fresh.map((id) => db.prepare('SELECT display_name FROM users WHERE id = ?').get(id).display_name);
-  const group = { id: g.id, name: g.name, created_by: g.created_by, created_at: g.created_at, member_count: current.size + fresh.length };
+  const group = { id: g.id, name: g.name, created_by: g.created_by, created_at: g.created_at, avatar_at: g.avatar_at ?? null, member_count: current.size + fresh.length };
   for (const id of fresh) emitTo(id, 'group:new', { group, by: req.user.display_name });
   groupNote(g, me, `${req.user.display_name} added ${joinList(names)}`);
   for (const id of memberIds(g.id)) emitTo(id, 'group:members', { group_id: g.id });
@@ -782,26 +856,55 @@ api.get('/groups/:id/messages', needUser, (req, res) => {
   if (!g) return;
   const messages = db
     .prepare(
-      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at, m.kind
+      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at, m.kind, m.image_id
        FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? AND m.created_at >= ? ORDER BY m.id DESC LIMIT 50`,
     )
     .all(g.id, g.joined_at)
     .reverse();
+  const rx = loadReactions('group', messages.map((m) => m.id), req.user.id);
+  for (const m of messages) m.reactions = rx.get(m.id) ?? [];
   markGroupRead(g.id, req.user.id);
   announceGroupRead(g.id, req.user.id);
   res.json({ messages, reads: groupReads(g.id, req.user.id) });
 });
 
+function deliverGroupMessage(g, req, res, body, imageId = null) {
+  const now = Date.now();
+  const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at, image_id) VALUES (?,?,?,?,?)').run(g.id, req.user.id, body, now, imageId);
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg', image_id: imageId, reactions: [] };
+  for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
+  res.json({ message });
+}
 api.post('/groups/:id/messages', needUser, socialLimiter, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
   const body = cleanBody(req.body?.body, 2000);
   if (!body) return res.status(400).json({ error: 'invalid_message' });
-  const now = Date.now();
-  const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at) VALUES (?,?,?,?)').run(g.id, req.user.id, body, now);
-  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg' };
-  for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
-  res.json({ message });
+  deliverGroupMessage(g, req, res, body);
+});
+// A picture in the group (raw image bytes; optional ?caption=…).
+api.post('/groups/:id/messages/image', needUser, limiter(20), parseChatImage, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const mime = sniffImage(req.body);
+  if (!mime) return res.status(400).json({ error: 'invalid_image' });
+  deliverGroupMessage(g, req, res, cleanBody(req.query.caption, 500) || IMAGE_BODY, saveChatImage(req.user.id, mime, req.body));
+});
+// React to a group message. Only people who were already in the group when it was sent can see (or add to) its reactions.
+api.put('/groups/:id/messages/:mid/react', needUser, limiter(60), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const me = req.user.id;
+  const mid = Number(req.params.mid);
+  const emoji = String(req.body?.emoji ?? '');
+  if (!isReactionEmoji(emoji)) return res.status(400).json({ error: 'invalid_reaction' });
+  const m = Number.isInteger(mid) ? db.prepare('SELECT from_id, created_at, kind FROM group_messages WHERE id = ? AND group_id = ?').get(mid, g.id) : null;
+  if (!m || m.kind !== 'msg' || m.created_at < g.joined_at) return res.status(404).json({ error: 'message_not_found' });
+  if (m.from_id !== me && blockedEither(me, m.from_id)) return res.status(403).json({ error: 'cannot_contact' });
+  toggleReaction('group', mid, me, emoji);
+  const viewers = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND joined_at <= ?').all(g.id, m.created_at).map((r) => r.user_id);
+  for (const uid of viewers) emitTo(uid, 'reaction:update', { kind: 'group', group_id: g.id, message_id: mid, reactions: loadReactions('group', [mid], uid).get(mid) ?? [] });
+  res.json({ reactions: loadReactions('group', [mid], me).get(mid) ?? [] });
 });
 
 /* ---------- chats list: every conversation you have, newest first ---------- */
@@ -826,7 +929,7 @@ api.get('/chats', needUser, (req, res) => {
   const lastMsg = db.prepare("SELECT u.display_name AS from_name, x.from_id, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' AND x.created_at >= ? ORDER BY x.id DESC LIMIT 1");
   const groups = db
     .prepare(
-      `SELECT g.id, g.name, g.created_at, m.joined_at,
+      `SELECT g.id, g.name, g.created_at, m.joined_at, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at,
          (SELECT COUNT(*) FROM group_members z WHERE z.group_id = g.id) AS member_count,
          (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg') AS unread
        FROM group_chats g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?`,
@@ -834,7 +937,7 @@ api.get('/chats', needUser, (req, res) => {
     .all(me, me)
     .map((g) => {
       const l = lastMsg.get(g.id, g.joined_at);
-      return { type: 'group', id: g.id, name: g.name, member_count: g.member_count, preview: l ? l.body : null, from_name: l?.from_name ?? null, mine: l ? l.from_id === me : false, at: l ? l.created_at : g.created_at, unread: g.unread };
+      return { type: 'group', id: g.id, name: g.name, avatar_at: g.avatar_at, member_count: g.member_count, preview: l ? l.body : null, from_name: l?.from_name ?? null, mine: l ? l.from_id === me : false, at: l ? l.created_at : g.created_at, unread: g.unread };
     });
   res.json({ chats: [...dms, ...groups].sort((a, b) => b.at - a.at) });
 });

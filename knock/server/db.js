@@ -218,9 +218,40 @@ if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'chat_a
   db.exec('ALTER TABLE users ADD COLUMN chat_activity INTEGER NOT NULL DEFAULT 1');
 }
 
-// Optional profile details people can fill in on /profile/edit (all NULL until then). birthday is 'YYYY-MM-DD'.
+// Optional profile details people can fill in in Settings (all NULL until then). birthday is 'YYYY-MM-DD'.
 for (const col of ['first_name', 'last_name', 'middle_initial', 'birthday', 'workplace', 'country']) {
   if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+}
+
+// Chat pictures, emoji reactions and group pictures.
+// chat_images: one row per picture sent in a chat (the browser shrinks it first). Who may see it is decided from the
+// message that carries it (see server/chat-extras.js), never from the id alone.
+// reactions: kind is 'dm' (messages.id) or 'group' (group_messages.id); one row per person per emoji per message.
+db.exec(`
+CREATE TABLE IF NOT EXISTS chat_images (
+  id INTEGER PRIMARY KEY,
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reactions (
+  kind TEXT NOT NULL CHECK (kind IN ('dm', 'group')),
+  message_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, message_id, user_id, emoji)
+);
+CREATE TABLE IF NOT EXISTS group_avatars (
+  group_id INTEGER PRIMARY KEY REFERENCES group_chats(id) ON DELETE CASCADE,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`);
+for (const table of ['messages', 'group_messages']) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'image_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN image_id INTEGER`);
 }
 
 // Blocking helpers. hasBlocked(a, b): a blocked b. blockedEither: either of them blocked the other.
@@ -249,6 +280,11 @@ export function purgeExpired() {
   const now = Date.now();
   db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').run(now);
   db.prepare('DELETE FROM otps WHERE expires_at < ?').run(now);
+  // Pictures whose message is gone (a deleted group, a removed account) and reactions on messages that no longer exist.
+  db.exec(`DELETE FROM chat_images WHERE id NOT IN (SELECT image_id FROM messages WHERE image_id IS NOT NULL)
+             AND id NOT IN (SELECT image_id FROM group_messages WHERE image_id IS NOT NULL)`);
+  db.exec(`DELETE FROM reactions WHERE (kind = 'dm' AND message_id NOT IN (SELECT id FROM messages))
+             OR (kind = 'group' AND message_id NOT IN (SELECT id FROM group_messages))`);
   db.prepare(
     `DELETE FROM call_sessions WHERE created_at < ?
        AND id NOT IN (SELECT session_id FROM appointments)

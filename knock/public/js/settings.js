@@ -211,17 +211,55 @@ function signIn() {
 }
 
 /* =====================================================================================
-   Profile names + security
+   Profile details (display name + optional personal info shown on your full profile)
+   ===================================================================================== */
+function details() {
+  const today = new Date();
+  const maxDay = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const field = (id, label, props, { wide = false, hint = null } = {}) => {
+    const input = h('input', { id, ...props });
+    return { input, wrap: h('div', { class: 'detail-cell' + (wide ? ' wide' : '') }, h('label', { for: id }, label), input, hint ? h('p', { class: 'hint' }, hint) : null) };
+  };
+  const display = field('dName', 'Display name', { maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name }, { wide: true, hint: 'What people see in calls and chats.' });
+  const first = field('dFirst', 'First name', { maxlength: '40', autocomplete: 'given-name', value: me.first_name || '' });
+  const last = field('dLast', 'Last name', { maxlength: '40', autocomplete: 'family-name', value: me.last_name || '' });
+  const initial = field('dInitial', 'Middle initial', { maxlength: '2', autocomplete: 'additional-name', placeholder: 'M', value: me.middle_initial || '' });
+  const birthday = field('dBirthday', 'Birthday', { type: 'date', min: '1900-01-01', max: maxDay, autocomplete: 'bday', value: me.birthday || '' });
+  const country = field('dCountry', 'Country', { maxlength: '60', autocomplete: 'country-name', value: me.country || '' });
+  const work = field('dWork', 'Workplace', { maxlength: '80', autocomplete: 'organization', value: me.workplace || '' }, { wide: true });
+
+  const msg = h('p', { class: 'error', role: 'alert' });
+  const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save details');
+  const form = h('form', { class: 'detail-form' },
+    h('p', { class: 'hint' }, 'Only your display name is required. The rest is optional and shows on your full profile for other signed-in people.'),
+    h('div', { class: 'detail-group' }, h('h3', {}, 'Name'), h('div', { class: 'detail-grid' }, display.wrap, first.wrap, last.wrap, initial.wrap)),
+    h('div', { class: 'detail-group' }, h('h3', {}, 'About you'), h('div', { class: 'detail-grid' }, birthday.wrap, country.wrap, work.wrap)),
+    msg,
+    h('div', { class: 'set-actions' }, save));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault(); msg.textContent = '';
+    save.disabled = true;
+    try {
+      const r = await api('/api/me/details', { method: 'PUT', body: {
+        display_name: display.input.value, first_name: first.input.value, last_name: last.input.value, middle_initial: initial.input.value,
+        birthday: birthday.input.value, country: country.input.value, workplace: work.input.value,
+      } });
+      Object.assign(me, r);
+      user.display_name = r.display_name;
+      initial.input.value = r.middle_initial || '';
+      announce();
+      toast('Details saved');
+    } catch (err) { msg.textContent = errText(err); }
+    finally { save.disabled = false; }
+  });
+  return section('dtH', 'Profile details', form);
+}
+
+/* =====================================================================================
+   Username + security
    ===================================================================================== */
 function names() {
   const msg = h('p', { class: 'error', role: 'alert' });
-  const name = h('input', { id: 'sName', maxlength: '40', required: true, autocomplete: 'nickname', value: me.display_name });
-  const nameForm = h('form', {}, h('label', { for: 'sName' }, 'Display name'), name, h('div', { class: 'pic-actions' }, h('button', { class: 'btn sm' }, 'Save name'), h('a', { class: 'btn sm', href: '/profile/edit' }, 'Edit details')));
-  nameForm.addEventListener('submit', async (e) => {
-    e.preventDefault(); msg.textContent = '';
-    try { const r = await api('/api/me', { method: 'PATCH', body: { display_name: name.value } }); me.display_name = user.display_name = r.display_name; announce(); toast('Name saved'); }
-    catch (err) { msg.textContent = errText(err); }
-  });
   const handle = h('input', { id: 'sHandle', maxlength: '20', required: true, autocomplete: 'username', spellcheck: 'false', value: me.handle });
   const handleForm = h('form', {}, h('label', { for: 'sHandle' }, 'Username'), handle,
     h('p', { class: 'hint' }, '3 to 20 letters or numbers. Friends find you with @username, and your profile link uses it. You can change it up to 5 times an hour.'),
@@ -231,7 +269,7 @@ function names() {
     try { const r = await api('/api/me/username', { method: 'PATCH', body: { handle: handle.value } }); me.handle = user.handle = r.handle; handle.value = r.handle; announce(); toast('Username saved'); }
     catch (err) { msg.textContent = errText(err); }
   });
-  return section('prH', 'Your names', nameForm, handleForm, msg);
+  return section('prH', 'Username', handleForm, msg);
 }
 
 function security() {
@@ -273,4 +311,4 @@ function blocked() {
   return section('blH', 'Blocked people', h('p', { class: 'hint' }, 'Blocked people can’t message you, send you friend requests, find your profile or join a call you’re in. They aren’t told. Unblocking doesn’t bring a friendship back.'), list);
 }
 
-root.replaceChildren(appearance(), signIn(), names(), chatPrivacy(), blocked(), security());
+root.replaceChildren(appearance(), signIn(), details(), names(), chatPrivacy(), blocked(), security());
