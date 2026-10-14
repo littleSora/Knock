@@ -259,8 +259,11 @@ function reactionsEl(m) {
     return h('button', { class: 'react-chip' + (mine ? ' mine' : ''), type: 'button', 'aria-pressed': String(mine), 'aria-label': `${r.emoji} ${r.users.length}${mine ? ', you reacted' : ''}`, onclick: () => react(m, r.emoji) }, r.emoji, h('span', {}, String(r.users.length)));
   });
   const add = h('button', { class: 'react-add', type: 'button', 'aria-label': 'Add a reaction', 'aria-expanded': String(picking), onclick: () => { S.pickFor = picking ? null : m.id; renderChatList(false); } }, icon('smile', 15));
+  const pick = picking
+    ? h('div', { class: 'react-pick', role: 'group', 'aria-label': 'Pick a reaction' }, REACTION_EMOJI.map((e) => h('button', { class: 'react-opt', type: 'button', 'aria-label': `React ${e}`, onclick: () => { S.pickFor = null; react(m, e); } }, e)))
+    : null;
   const own = isMine(m);
-  const act = (label, fn, danger = false) => h('button', { class: 'msg-act' + (danger ? ' danger' : ''), type: 'button', onclick: fn }, label);
+  const act =(label, fn, danger = false) => h('button', { class: 'msg-act' + (danger ? ' danger' : ''), type: 'button', onclick: fn }, label);
   const actions = [act(m.pinned ? 'Unpin' : 'Pin', () => togglePin(m)), own && canEdit(m) ? act('Edit', () => startEdit(m)) : null, own ? act('Delete', () => deleteMessage(m), true) : null];
   return h('div', { class: 'reacts' }, chips, add, ...actions, pick);
 }
