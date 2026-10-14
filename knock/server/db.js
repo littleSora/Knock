@@ -254,6 +254,19 @@ for (const table of ['messages', 'group_messages']) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'image_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN image_id INTEGER`);
 }
 
+// Editing, deleting and pinning messages. A deleted message keeps its row (so a report can still quote it) but its content is
+// never sent to anyone's browser again: chats show “This message was deleted” in its place. Pictures are removed for good.
+const ensureColumn = (table, col, ddl) => {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+};
+for (const table of ['messages', 'group_messages']) for (const col of ['edited_at', 'deleted_at', 'pinned_at', 'pinned_by']) ensureColumn(table, col, 'INTEGER');
+
+// Group roles. The creator (group_chats.created_by) is always an admin and can make other members admins. The creator can also
+// limit who may rename the group and who may add people; by default nothing is limited, exactly as before.
+ensureColumn('group_members', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('group_chats', 'only_admins_rename', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('group_chats', 'only_admins_add', 'INTEGER NOT NULL DEFAULT 0');
+
 // Blocking helpers. hasBlocked(a, b): a blocked b. blockedEither: either of them blocked the other.
 const blockOne = db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?');
 export const hasBlocked = (a, b) => !!blockOne.get(a, b);

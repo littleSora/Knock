@@ -56,6 +56,9 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 | Settings page | **Settings** button at the bottom of the account info (round picture, top right) opens `/settings` (a new tab when you're in a call). Sections: Appearance, Email/phone/sign-in, Names, Security. See below |
 | Group calls, pictures and reactions | **Call group** (top of any group chat): one tap creates a session, sends its link to every member as a message (shown as a **Join the group call** link) and takes you into the call. Already in a call? It sends *that* call's link and keeps you there. **Group picture**: group info > *Add a picture* uses the same cropper as profile pictures; any member can change or remove it, and the chat gets a "X changed the group picture" note (`group_avatars`, `/api/groups/:id/avatar`). **Pictures in chats**: the picture button next to the message box (friend chats and groups); text typed in the box becomes the caption. The browser shrinks it to 1280 px JPEG first; the server stores it in `chat_images`, and `/api/chat-images/:id` only serves it to people in that chat (group members must have been in the group when it was sent; blocked pairs get nothing). **Reactions**: the smiley under any message opens 👍 ❤️ 😂 😮 😢 🙏 (list in `public/js/reactions.js`); tap your chip again to take it back. Live via `reaction:update`; stored in `reactions`; people you've blocked (or who blocked you) are left out. Server rules live in `server/chat-extras.js` |
 | Block and report | **Block** and **Report** sit under every profile: the profile card in a call, the card in a direct-message chat, the `/u/<handle>` page, and each member in a group's info card. Report is a three-step dialog (category, reason, details) with the presets in `public/js/report-categories.js`. Blocked people are listed under **Settings > Blocked people**. See below |
+| Edit, delete, pin and search messages | Tap the **⋯** under any message in a friend chat or group chat (also in a call's chat dock). **Edit** and **Delete** are for your own messages; **Pin** is for anyone in the chat. A magnifier in the chat header searches that conversation. See *Message tools* below |
+| Group admins | The group info card has **Group rules** (creator only): *Only admins can change the group name* and *Only admins can add people*. The creator is always an admin and can tap **Make admin** next to a member. See *Group admins* below |
+| Browser notifications | **Settings > Notifications** turns them on for this browser. See *Notifications* below |
 | CAPTCHA | reCAPTCHA gate at `/verify`. Every page, API route and WebSocket needs the signed "human" cookie it sets |
 | Hidden keys and endpoints | See below |
 
@@ -66,6 +69,29 @@ Behind a proxy/host such as nginx, Render or Cloudflare, set `TRUST_PROXY=1` so 
 - **Typing:** "Ana is typing…" (also "Ana and Ben are typing…", "Several people are typing…") in friend chats, group chats and the in-call chat. Typing is never stored: the browser sends `typing` at most every 2.5 s while keys are pressed and `on: false` when you stop, send, close the chat or click away. Other people hide it after 5 s of silence.
 - **Privacy:** Settings > *Chat privacy* has one switch (`users.chat_activity`, on by default). Off means you neither show nor see receipts and typing. Between two people it only works when both have it on, they are friends of each other and neither blocked the other, and this is enforced on the server (`shareActivity` in `server/db.js`). Someone who isn't your friend never learns whether you read their message.
 - Opening a chat (or "Mark all as read") is what counts as reading. Spam-tab messages never send a receipt.
+
+## Message tools
+
+- **Edit** (`PATCH /api/messages/:id`, `PATCH /api/groups/:id/messages/:mid`): sender only, text and picture captions (a picture with no caption has nothing to edit). The bubble shows *Edited*. There is no time limit, and the earlier wording is not kept.
+- **Delete** (`DELETE` on the same URLs): sender only, for everyone. The chat shows *This message was deleted* in its place; its reactions, pin and picture are removed and it stops counting as unread. The text itself stays in the database and is never sent to a browser again, so a report can still quote it (`npm run reports` marks such lines `[deleted by sender later]`). Deleting still works if the other person has blocked you; they are just not told.
+- **Pins** (`PUT .../pin`): up to 10 per chat. In a friend chat either person can pin or unpin; in a group any member can. A bar under the chat header shows the newest pin (and `+N`); tap it for the list with **Show** and **Unpin**.
+- **Search** (`GET /api/messages/with/:id/search?q=`, `GET /api/groups/:id/messages/search?q=`): at least 2 letters, newest 30 hits, deleted messages and group notes are skipped, and in a group only messages from after you joined are searched. Tapping a hit loads the stretch of conversation around it (`?around=<message id>`) and highlights it. While you are looking at older messages a **Jump to latest** bar appears and new messages wait behind it. Matching is case-insensitive for English letters only (SQLite `LIKE`).
+- Live updates arrive as a `message:changed` event to both people (or the whole group); someone with a block between you is never sent one.
+
+## Group admins
+
+- Roles are **creator**, **admin** and **member**. The creator is always an admin and is the only person who can change roles or rules (`PUT /api/groups/:id/members/:userId/admin`, `PUT /api/groups/:id/settings`). Both leave a note in the chat.
+- Two rules, both off by default (so existing groups behave exactly as before): *Only admins can change the group name* and *Only admins can add people*. When on, everyone else gets `admins_only` from the server and the info card hides the controls.
+- Admins get past those two rules. Removing members is still creator-only, and anyone can still leave, chat, react, pin and change the group picture.
+- If the creator leaves, an existing admin becomes the creator before anyone else does; otherwise the longest-standing member, as before.
+
+## Notifications
+
+- **Settings > Notifications** asks the browser for permission and turns them on **for that browser** (the choice is kept in `localStorage`, like the browser's own permission). Code: `public/js/notify.js`, `public/sw.js`, served at `/sw.js`.
+- A notification appears for a new friend message or group message only when you are **not looking at a Knock tab**: the tab is in the background, minimised, or another window has focus. If another Knock tab of yours is in front, nothing pops up. Each chat's notifications replace one another, so a busy chat does not stack up. Tapping one brings the tab forward and opens that chat.
+- Never notified: Spam-tab messages, your own messages, and group notes (*Sam left*). *Show the message text* can be switched off (then it just says *New message*).
+- It works while Knock is open in a tab or window. It does **not** wake a closed browser; that needs real Web Push (a VAPID key pair and the `web-push` package), which is not included.
+- Needs `localhost` or HTTPS, like camera and mic.
 
 ## Settings page (`/settings`)
 
@@ -115,5 +141,5 @@ What this does not do yet: guests can't be reported or blocked (they have no acc
 - Calls are peer-to-peer mesh, comfortable up to about 6 people (`MAX_PEOPLE` in `server/realtime.js`). Larger rooms need an SFU such as LiveKit.
 - A "call" for the dashboard is a session where you were present with at least one other person.
 - Run a single server process; presence and live rooms are kept in memory.
-- **Groups.** Anyone in a group can rename it and add *their own* friends (up to 20 people). Anyone can leave. Only the creator can remove other people. If the creator leaves, the longest-standing member becomes the creator; when the last person leaves, the group is deleted. People see only messages from after they joined, and "X added Y" / "X left" notes appear in the chat. Unread counts show on each group row and in the bell badge; your own messages and those notes never count.
+- **Groups.** Anyone in a group can rename it and add *their own* friends (up to 20 people), unless the creator limited that to admins (see *Group admins*). Anyone can leave. Only the creator can remove other people. If the creator leaves, an admin (or else the longest-standing member) becomes the creator; when the last person leaves, the group is deleted. People see only messages from after they joined, and "X added Y" / "X left" notes appear in the chat. Unread counts show on each group row and in the bell badge; your own messages and those notes never count.
 - Not included yet: account deletion, linking Google from Settings (it links automatically the first time you use Google with the same email), email/SMS cost controls beyond rate limits.

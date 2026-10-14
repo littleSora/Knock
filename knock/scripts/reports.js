@@ -33,7 +33,7 @@ if (cmd === 'open' || cmd === 'all') {
   if (r.review_note) console.log(`Review:   ${r.review_note} (${when(r.reviewed_at)})`);
   if (r.evidence) {
     console.log('\nSaved messages:');
-    for (const m of JSON.parse(r.evidence)) console.log(`  ${when(m.at)}  ${m.from.padEnd(8)} ${m.body.replace(/\s+/g, ' ')}`);
+    for (const m of JSON.parse(r.evidence)) console.log(`  ${when(m.at)}  ${m.from.padEnd(8)} ${m.body.replace(/\s+/g, ' ')}${m.deleted ? '  [deleted by sender later]' : ''}`);
   }
 } else if (cmd === 'resolve' || cmd === 'dismiss') {
   const info = db.prepare("UPDATE reports SET status = ?, reviewed_at = ?, review_note = ? WHERE id = ? AND status = 'open'")

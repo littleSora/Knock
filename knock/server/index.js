@@ -40,6 +40,11 @@ app.use(express.json({ limit: '20kb' }));
 app.use(cookieParser(cfg.cookieSecret));
 app.use(originGuard);
 app.use('/assets', express.static(path.join(root, 'public'), { maxAge: isProd ? '1h' : 0 }));
+// The notification service worker has to be served from the site root to be allowed to control every page. It holds no secrets.
+app.get('/sw.js', (_req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.type('application/javascript').sendFile(path.join(root, 'public', 'sw.js'));
+});
 
 /* ---------- API: global rate limit, then the human check, then login lookup ---------- */
 app.use('/api', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }));

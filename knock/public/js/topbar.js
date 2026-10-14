@@ -4,8 +4,9 @@ import { prepareChatImage, uploadChatImage, imageErrorText, imagePicker, openIma
 import { cropAvatar } from './cropper.js';
 import { safetyActions, openReport } from './safety.js';
 import { profileButton } from './account.js';
+import * as notify from './notify.js';
 
-const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0, pickFor: null };
+const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0, pickFor: null, menuFor: null, editing: null, editDraft: '', highlight: null };
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtStamp = (ms) => `${fmtDate(ms)} at ${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 let bar, badgeEl, chatBadgeEl, panels, sock;
@@ -46,7 +47,7 @@ function wirePanels() {
 }
 // A message that is just this site's call link is a call invite: show "Call invite" in previews instead of the raw link.
 const isInvite = (b) => typeof b === 'string' && b.startsWith(location.origin + '/s/') && !/\s/.test(b);
-const previewText = (b) => (isInvite(b) ? 'Call invite' : b);
+const previewText = (b) => (b === '' ? 'Message deleted' : isInvite(b) ? 'Call invite' : b);
 // In a call, anything that would navigate (profiles, call invites) opens in a new tab so you never drop out of the call.
 const newTab = () => (S.inCall ? { target: '_blank', rel: 'noopener' } : {});
 
@@ -258,8 +259,10 @@ function reactionsEl(m) {
     return h('button', { class: 'react-chip' + (mine ? ' mine' : ''), type: 'button', 'aria-pressed': String(mine), 'aria-label': `${r.emoji} ${r.users.length}${mine ? ', you reacted' : ''}`, onclick: () => react(m, r.emoji) }, r.emoji, h('span', {}, String(r.users.length)));
   });
   const add = h('button', { class: 'react-add', type: 'button', 'aria-label': 'Add a reaction', 'aria-expanded': String(picking), onclick: () => { S.pickFor = picking ? null : m.id; renderChatList(false); } }, icon('smile', 15));
-  const pick = picking ? h('div', { class: 'react-pick', role: 'group', 'aria-label': 'Pick a reaction' }, REACTION_EMOJI.map((e) => h('button', { class: 'react-opt', type: 'button', 'aria-label': e, onclick: () => { S.pickFor = null; react(m, e); } }, e))) : null;
-  return h('div', { class: 'reacts' }, chips, add, pick);
+  const own = isMine(m);
+  const act = (label, fn, danger = false) => h('button', { class: 'msg-act' + (danger ? ' danger' : ''), type: 'button', onclick: fn }, label);
+  const actions = [act(m.pinned ? 'Unpin' : 'Pin', () => togglePin(m)), own && canEdit(m) ? act('Edit', () => startEdit(m)) : null, own ? act('Delete', () => deleteMessage(m), true) : null];
+  return h('div', { class: 'reacts' }, chips, add, ...actions, pick);
 }
 async function react(m, emoji) {
   const chat = S.chat;
@@ -272,10 +275,13 @@ async function react(m, emoji) {
 }
 // One message: the bubble (text and/or picture) plus its reactions.
 function bubbleEl(m, mine, content, who = null) {
+  if (m.deleted) return h('div', { class: 'msg-wrap' + (mine ? ' mine' : ''), 'data-mid': String(m.id) }, h('div', { class: 'msg deleted' }, mine ? 'You deleted this message' : 'This message was deleted'));
+  if (S.editing === m.id) return editEl(m, mine);
   const pic = !!m.image_id;
   const caption = pic && m.body !== IMAGE_BODY ? m.body : null;
   const bubble = h('div', { class: 'msg' + (mine ? ' mine' : '') + (pic ? ' has-img' : '') }, who, pic ? imageEl(m) : null, pic ? (caption ? h('span', { class: 'caption' }, caption) : null) : content);
-  return h('div', { class: 'msg-wrap' + (mine ? ' mine' : '') }, bubble, reactionsEl(m));
+  const meta = m.pinned || m.edited_at ? h('div', { class: 'msg-meta' }, m.pinned ? h('span', { class: 'pin-mark' }, icon('pin', 12), 'Pinned') : null, m.edited_at ? h('span', {}, 'Edited') : null) : null;
+  return h('div', { class: 'msg-wrap' + (mine ? ' mine' : '') + (S.highlight === m.id ? ' hit' : ''), 'data-mid': String(m.id) }, bubble, meta, reactionsEl(m));
 }
 function msgEl(m, other) {
   const isLink = isInvite(m.body) && !m.image_id; // same-origin call invite
@@ -288,11 +294,184 @@ function msgEl(m, other) {
 }
 function appendMsg(m) {
   if (!S.chat || S.chat.messages.some((x) => x.id === m.id)) return;
+  if (S.chat.latest === false) { // showing an older stretch (from a search): your own message takes you back to the end, others wait behind "Jump to latest"
+    if (m.from_id === S.meId) jumpLatest();
+    return;
+  }
   S.chat.messages.push(m);
   const t = S.typing.get(m.from_id); // their message arrived, so "typing…" is over
   if (t) { clearTimeout(t.timer); S.typing.delete(m.from_id); paintTyping(); }
   renderChatList(true);
 }
+
+/* ---------- edit, delete and pin ---------- */
+const chatBase = (c) => (c.group ? `/api/groups/${c.group.id}/messages` : '/api/messages');
+const isMine = (m) => (S.chat.group ? m.from_id === S.meId : m.from_id !== S.chat.user.id);
+const canEdit = (m) => !m.deleted && !(m.image_id && m.body === IMAGE_BODY); // a picture with no caption has no text
+// The same change reaches this tab twice (the API reply and the live event) and other tabs / the other person once; applying it again is harmless.
+function applyChange(message, kind, gid) {
+  if (message.deleted) refreshNotif(); else refreshChats(); // the Chats list shows previews, and a deletion can lower unread counts
+  const c = S.chat;
+  if (!c) return;
+  const here = kind === 'group' ? c.group?.id === gid : !c.group && (message.from_id === c.user.id || message.to_id === c.user.id);
+  if (!here) return;
+  const w = c.messages.find((x) => x.id === message.id);
+  if (w) Object.assign(w, message);
+  const i = c.pins.findIndex((p) => p.id === message.id);
+  if (message.pinned && !message.deleted) { if (i >= 0) Object.assign(c.pins[i], message); else c.pins.unshift({ ...message }); }
+  else if (i >= 0) c.pins.splice(i, 1);
+  if (message.deleted && S.editing === message.id) { S.editing = null; S.editDraft = ''; }
+  renderChatList(false);
+}
+const kindOf = (c) => (c.group ? 'group' : 'dm');
+function startEdit(m) {
+  S.editing = m.id; S.editDraft = m.body; S.menuFor = null; S.pickFor = null;
+  renderChatList(false);
+  document.getElementById('edit-input')?.focus();
+}
+function cancelEdit() { S.editing = null; S.editDraft = ''; renderChatList(false); }
+async function saveEdit(m) {
+  const body = S.editDraft.trim();
+  if (!body) { toast(errText({ code: 'invalid_message' })); return; }
+  if (body === m.body) return cancelEdit();
+  const chat = S.chat;
+  try {
+    const { message } = await api(`${chatBase(chat)}/${m.id}`, { method: 'PATCH', body: { body } });
+    S.editing = null; S.editDraft = '';
+    applyChange(message, kindOf(chat), chat.group?.id);
+  } catch (err) { toast(errText(err)); }
+}
+function editEl(m, mine) {
+  const input = h('input', { type: 'text', id: 'edit-input', maxlength: '2000', value: S.editDraft, 'aria-label': 'Edit message', autocomplete: 'off' });
+  input.addEventListener('input', () => { S.editDraft = input.value; }); // kept, so an incoming message redrawing the chat doesn't lose what you typed
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); } });
+  return h('div', { class: 'msg-wrap edit' + (mine ? ' mine' : ''), 'data-mid': String(m.id) },
+    h('form', { class: 'msg-edit', onsubmit: (e) => { e.preventDefault(); saveEdit(m); } }, input,
+      h('button', { class: 'btn primary sm', type: 'submit' }, 'Save'), h('button', { class: 'btn sm', type: 'button', onclick: cancelEdit }, 'Cancel')));
+}
+async function deleteMessage(m) {
+  S.menuFor = null;
+  renderChatList(false);
+  const ok = await confirmDialog({ title: 'Delete this message?', body: 'It disappears for everyone in this chat. This can’t be undone.', confirmText: 'Delete' });
+  if (!ok) return;
+  const chat = S.chat;
+  try {
+    const { message } = await api(`${chatBase(chat)}/${m.id}`, { method: 'DELETE' });
+    applyChange(message, kindOf(chat), chat.group?.id);
+  } catch (err) { toast(errText(err)); }
+}
+async function togglePin(m) {
+  S.menuFor = null;
+  const chat = S.chat;
+  try {
+    const { message } = await api(`${chatBase(chat)}/${m.id}/pin`, { method: 'PUT', body: { pinned: !m.pinned } });
+    applyChange(message, kindOf(chat), chat.group?.id);
+  } catch (err) { toast(errText(err)); renderChatList(false); }
+}
+
+/* ---------- pinned messages: a bar under the chat's header, and a list with Show / Unpin ---------- */
+const pinText = (p) => (p.image_id && p.body === IMAGE_BODY ? '📷 Photo' : previewText(p.body));
+const pinWho = (p) => (p.from_id === S.meId ? 'You' : S.chat.group ? p.from_name : S.chat.user.display_name);
+function paintPins() {
+  const bar = document.getElementById('pin-bar');
+  if (!bar || !S.chat) return;
+  const pins = S.chat.pins;
+  bar.hidden = !pins.length;
+  bar.replaceChildren(...(pins.length ? [h('button', { class: 'pin-open', type: 'button', 'aria-haspopup': 'dialog', title: 'Pinned messages', onclick: openPins },
+    icon('pin', 14), h('span', { class: 'pin-text' }, `${pinWho(pins[0])}: ${pinText(pins[0])}`), pins.length > 1 ? h('span', { class: 'pin-more' }, `+${pins.length - 1}`) : null)] : []));
+}
+function openPins() {
+  const chat = S.chat;
+  if (!chat?.pins.length) return;
+  const body = h('div', {});
+  const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close pinned messages', onclick: () => m.close() }, icon('x', 16));
+  const m = openModal({ label: 'Pinned messages', wide: true }, h('div', { class: 'pop-head' }, h('strong', {}, 'Pinned messages'), h('span', { class: 'grow' }), closeBtn), body);
+  const paint = () => {
+    if (S.chat !== chat || !chat.pins.length) { m.close(); return; }
+    body.replaceChildren(h('ul', { class: 'rows' }, chat.pins.map((p) => h('li', { class: 'row' },
+      h('div', { class: 'row-main pick-text' }, h('span', { class: 'name' }, `${pinWho(p)} · ${shortWhen(p.created_at)}`), h('span', { class: 'sub pin-snippet' }, pinText(p))),
+      h('button', { class: 'link-btn', type: 'button', onclick: () => { m.close(); jumpTo(p.id); } }, 'Show'),
+      h('button', { class: 'link-btn danger', type: 'button', onclick: async () => { await togglePin(p); paint(); } }, 'Unpin')))));
+  };
+  paint();
+}
+
+/* ---------- search inside a chat, and jumping to a result ---------- */
+// The chat only holds its newest messages, so a hit further back is loaded as a window of messages around it.
+// While you're looking at such a window, new messages wait behind a "Jump to latest" bar.
+async function loadChat(around) {
+  const c = S.chat;
+  const q = around ? `?around=${around}` : '';
+  const r = await api(c.group ? `/api/groups/${c.group.id}/messages${q}` : `/api/messages/with/${c.user.id}${q}`);
+  if (S.chat !== c) return false;
+  c.messages = r.messages;
+  c.pins = r.pins || [];
+  c.latest = r.latest !== false;
+  if (c.group) c.reads = r.reads || c.reads;
+  return true;
+}
+async function jumpLatest() {
+  try { if (await loadChat(null)) { S.highlight = null; renderChatList(true); refreshNotif(); } } catch (err) { toast(errText(err)); }
+}
+async function jumpTo(id) {
+  closeSearch();
+  if (!S.chat) return;
+  try {
+    if (!S.chat.messages.some((m) => m.id === id) && !(await loadChat(id))) return;
+  } catch (err) { toast(errText(err)); return; }
+  S.highlight = id;
+  renderChatList(false);
+  S.chatStuck = false;
+  document.querySelector(`#chat-list [data-mid="${id}"]`)?.scrollIntoView({ block: 'center' });
+  setTimeout(() => { // the highlight fades after a moment
+    if (S.highlight !== id) return;
+    S.highlight = null;
+    document.querySelector(`#chat-list [data-mid="${id}"]`)?.classList.remove('hit');
+  }, 2500);
+}
+function closeSearch() { document.getElementById('chat-dock')?.classList.remove('searching'); }
+function toggleSearch() {
+  const dock = document.getElementById('chat-dock');
+  if (!dock) return;
+  if (dock.classList.contains('searching')) return closeSearch();
+  dock.classList.add('searching');
+  const input = document.getElementById('chat-search-input');
+  input?.focus();
+  input?.select();
+}
+const searchBtn = () => h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Search this chat', title: 'Search this chat', onclick: toggleSearch }, icon('search', 16));
+function hitEl(r, q) {
+  const text = r.body.replace(/\s+/g, ' ');
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  const from = Math.max(0, i - 30);
+  const snippet = i < 0 ? [text.slice(0, 110)] : [from > 0 ? '…' : '', text.slice(from, i), h('mark', {}, text.slice(i, i + q.length)), text.slice(i + q.length, i + q.length + 80)];
+  const who = r.from_id === S.meId ? 'You' : S.chat.group ? r.from_name : S.chat.user.display_name;
+  return h('button', { class: 'search-hit', type: 'button', onclick: () => jumpTo(r.id) },
+    h('span', { class: 'hit-meta' }, `${who} · ${shortWhen(r.created_at)}`), h('span', { class: 'hit-text' }, snippet));
+}
+function searchPanel() {
+  const input = h('input', { type: 'search', id: 'chat-search-input', maxlength: '100', placeholder: 'Search this chat', 'aria-label': 'Search this chat', autocomplete: 'off' });
+  const list = h('div', { class: 'search-list', role: 'region', 'aria-live': 'polite', 'aria-label': 'Search results' }, h('p', { class: 'hint' }, 'Type at least 2 letters.'));
+  let timer;
+  let seq = 0;
+  async function run() {
+    const q = input.value.trim();
+    const mine = ++seq;
+    if (q.length < 2) { list.replaceChildren(h('p', { class: 'hint' }, 'Type at least 2 letters.')); return; }
+    const chat = S.chat;
+    if (!chat) return;
+    try {
+      const url = chat.group ? `/api/groups/${chat.group.id}/messages/search?q=` : `/api/messages/with/${chat.user.id}/search?q=`;
+      const { results } = await api(url + encodeURIComponent(q));
+      if (mine !== seq || S.chat !== chat) return; // a newer search has started
+      list.replaceChildren(...(results.length ? results.map((r) => hitEl(r, q)) : [h('p', { class: 'empty' }, `No messages match “${q}”.`)]));
+    } catch (err) { list.replaceChildren(h('p', { class: 'error' }, errText(err))); }
+  }
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSearch(); } });
+  return h('div', { class: 'chat-search', id: 'chat-search' }, h('div', { class: 'search-row' }, input, h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close search', onclick: closeSearch }, icon('x', 16))), list);
+}
+const latestBar = () => h('div', { class: 'latest-bar', id: 'latest-bar', hidden: true }, h('button', { class: 'link-btn', type: 'button', onclick: jumpLatest }, 'You’re looking at older messages. Jump to latest'));
 
 /* ---------- "Seen" receipts and typing indicators ---------- */
 // Redraws the open chat. The "Sent / Seen" line sits under the last message you sent.
@@ -300,16 +479,21 @@ function renderChatList(stick) {
   const list = document.getElementById('chat-list');
   if (!list || !S.chat) return;
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const editing = document.activeElement?.id === 'edit-input'; // a redraw (say, a new message) must not take the cursor away
   const g = S.chat.group;
   const msgs = S.chat.messages;
   const mine = (m) => (g ? m.from_id === S.meId && m.kind !== 'system' : m.from_id !== S.chat.user.id);
   const els = msgs.map((m) => (g ? groupMsgEl(m) : msgEl(m, S.chat.user)));
-  const last = msgs.findLastIndex(mine);
+  const last = msgs.findLastIndex((m) => mine(m) && !m.deleted);
   const r = last >= 0 ? receiptEl(msgs[last]) : null;
   if (r) els.splice(last + 1, 0, r);
   list.replaceChildren(...els);
   S.chatStuck = !!(stick || atBottom);
   if (S.chatStuck) list.scrollTop = list.scrollHeight;
+  if (editing) { const e = document.getElementById('edit-input'); if (e) { e.focus(); e.setSelectionRange(e.value.length, e.value.length); } }
+  paintPins();
+  const bar = document.getElementById('latest-bar');
+  if (bar) bar.hidden = S.chat.latest !== false;
 }
 function receiptEl(m) {
   if (!S.share) return null; // if you keep yours private you don't see anyone's either
@@ -354,7 +538,7 @@ function stopTyping() {
   if (S.typingSentAt && S.typingTarget && sock?.connected) sock.emit('typing', { ...S.typingTarget, on: false });
   S.typingSentAt = 0;
 }
-function closeChat() { stopTyping(); clearTyping(); S.chat = null; S.pickFor = null; document.getElementById('chat-dock')?.remove(); }
+function closeChat() { stopTyping(); clearTyping(); S.chat = null; S.pickFor = null; S.menuFor = null; S.editing = null; S.editDraft = ''; S.highlight = null; document.getElementById('chat-dock')?.remove(); }
 
 // The picture button for a chat's message box. `send(blob, caption)` uploads and resolves with the new message; anything
 // typed in the box goes along as the caption.
@@ -378,10 +562,10 @@ function picturePicker(input, send) {
 
 async function openChat(u, { focus = true } = {}) {
   if (focus) closePanels();
-  const { messages } = await api('/api/messages/with/' + u.id);
+  const { messages, pins } = await api('/api/messages/with/' + u.id);
   stopTyping();
-  S.chat = { user: { id: u.id, display_name: u.display_name }, messages };
-  S.pickFor = null;
+  S.chat = { user: { id: u.id, display_name: u.display_name }, messages, pins: pins || [], latest: true };
+  S.pickFor = null; S.menuFor = null; S.editing = null; S.editDraft = '';
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${u.display_name}`, 'aria-label': 'Message', autocomplete: 'off' });
   const list = h('div', { class: 'chat-list', id: 'chat-list' });
@@ -397,8 +581,10 @@ async function openChat(u, { focus = true } = {}) {
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Chat with ${u.display_name}` },
     h('header', {}, h('button', { class: 'name-btn', type: 'button', 'aria-haspopup': 'dialog', title: 'View profile', onclick: () => openProfileCard(u) }, u.display_name), h('span', { class: 'grow' }),
       h('button', { class: 'link-btn', onclick: () => inviteToCall(u) }, 'Invite to call'),
+      searchBtn(),
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
-    list, h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
+    h('div', { class: 'pin-bar', id: 'pin-bar', hidden: true }), searchPanel(),
+    list, latestBar(), h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
   wireTyping(input, { to: u.id });
   renderChatList(true);
   if (focus) input.focus();
@@ -538,12 +724,12 @@ async function callGroup(g) {
 }
 async function openGroupChat(g, { focus = true } = {}) {
   if (focus) closePanels();
-  let messages, reads;
-  try { ({ messages, reads } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
+  let messages, reads, pins;
+  try { ({ messages, reads, pins } = await api(`/api/groups/${g.id}/messages`)); } catch (e) { toast(errText(e)); return; }
   stopTyping();
   const known = S.groups.find((x) => x.id === g.id);
-  S.chat = { group: { id: g.id, name: g.name, avatar_at: g.avatar_at ?? known?.avatar_at ?? null }, messages, reads: reads || [] };
-  S.pickFor = null;
+  S.chat = { group: { id: g.id, name: g.name, avatar_at: g.avatar_at ?? known?.avatar_at ?? null }, messages, reads: reads || [], pins: pins || [], latest: true };
+  S.pickFor = null; S.menuFor = null; S.editing = null; S.editDraft = '';
   document.getElementById('chat-dock')?.remove();
   const input = h('input', { type: 'text', maxlength: '2000', placeholder: `Message ${g.name}`, 'aria-label': 'Message the group', autocomplete: 'off', id: 'group-input' });
   const list = h('div', { class: 'chat-list', id: 'chat-list' });
@@ -560,8 +746,10 @@ async function openGroupChat(g, { focus = true } = {}) {
     h('header', {}, h('span', { id: 'group-pic' }, groupAvatarEl(S.chat.group, 28)),
       h('button', { class: 'name-btn', id: 'group-title', type: 'button', 'aria-haspopup': 'dialog', title: 'Group info', onclick: () => openGroupInfo(S.chat.group) }, g.name), h('span', { class: 'grow' }),
       h('button', { class: 'btn primary sm call-group', type: 'button', title: 'Start a call and send the link to everyone in this group', onclick: () => callGroup(S.chat.group) }, h('span', { class: 'btn-ic' }, icon('video', 16)), 'Call group'),
+      searchBtn(),
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
-    list, h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
+    h('div', { class: 'pin-bar', id: 'pin-bar', hidden: true }), searchPanel(),
+    list, latestBar(), h('div', { class: 'chat-status', id: 'chat-status', role: 'status' }), form));
   wireTyping(input, { group_id: g.id });
   renderChatList(true);
   if (focus) input.focus();
@@ -589,6 +777,7 @@ async function openGroupInfo(g) {
   function renderInfo() {
     const { group, members } = data;
     const iAmCreator = group.created_by === S.meId;
+    const iAmAdmin = !!group.me_admin; // the creator, or someone the creator made an admin
     const msg = h('p', { class: 'error', role: 'alert' });
     const nameInput = h('input', { id: 'grpRename', maxlength: '40', required: true, autocomplete: 'off', value: group.name });
     const form = h('form', {}, h('label', { for: 'grpRename' }, 'Group name'), nameInput, h('button', { class: 'btn sm', type: 'submit' }, 'Save name'));
@@ -616,6 +805,26 @@ async function openGroupInfo(g) {
       try { await api(`/api/groups/${group.id}/members/${S.meId}`, { method: 'DELETE' }); m.close(); dropGroup(group.id); toast(`You left “${group.name}”`); }
       catch (err) { msg.textContent = errText(err); }
     };
+    const setAdmin = async (u, admin) => {
+      msg.textContent = '';
+      try { await api(`/api/groups/${group.id}/members/${u.id}/admin`, { method: 'PUT', body: { admin } }); await load(); render(); toast(admin ? `${u.display_name} is now an admin` : `${u.display_name} is no longer an admin`); }
+      catch (err) { msg.textContent = errText(err); }
+    };
+    // The creator decides who may rename the group and who may add people. Admins (and the creator) always can.
+    const ruleBox = (id, label, key) => {
+      const box = h('input', { type: 'checkbox', id, checked: !!group[key] });
+      box.addEventListener('change', async () => {
+        msg.textContent = '';
+        try { await api(`/api/groups/${group.id}/settings`, { method: 'PUT', body: { [key]: box.checked } }); group[key] = box.checked; render(); }
+        catch (err) { box.checked = !box.checked; msg.textContent = errText(err); }
+      });
+      return h('label', { class: 'check-row', for: id }, box, h('span', {}, label));
+    };
+    const rules = iAmCreator ? h('div', { class: 'group-rules' },
+      h('h3', {}, 'Group rules'),
+      ruleBox('grpRuleRename', 'Only admins can change the group name', 'only_admins_rename'),
+      ruleBox('grpRuleAdd', 'Only admins can add people', 'only_admins_add'),
+      h('p', { class: 'hint' }, 'You’re always an admin. Tap “Make admin” next to a member to give them the same powers.')) : null;
     // Group picture: same cropper and rules as profile pictures. Any member can change it.
     const picMsg = h('p', { class: 'error', role: 'alert' });
     const picFile = h('input', { type: 'file', accept: PICK_TYPES.join(','), hidden: true, 'aria-label': 'Choose a group picture' });
@@ -660,11 +869,17 @@ async function openGroupInfo(g) {
       h('ul', { class: 'rows' }, members.map((u) => h('li', { class: 'row' },
         avatarEl(u, 34),
         h('div', { class: 'row-main pick-text' }, h('span', { class: 'name' }, u.id === S.meId ? `${u.display_name} (you)` : u.display_name), h('span', { class: 'sub' }, '@' + u.handle)),
-        u.is_creator ? h('span', { class: 'member-tag' }, 'Creator') : null,
-        u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Report ${u.display_name}`, onclick: () => openReport(u, { context: { type: 'group', id: group.id } }) }, 'Report') : null,
-        iAmCreator && u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Remove ${u.display_name}`, onclick: () => removeMember(u) }, 'Remove') : null))),
-      h('button', { class: 'btn sm', type: 'button', onclick: () => { view = 'add'; refreshFriends().then(() => view === 'add' && render()); render(); } }, h('span', { class: 'btn-ic' }, icon('userPlus', 16)), 'Add people'),
-      h('h3', {}, 'Change group name'), form, msg,
+        u.is_creator ? h('span', { class: 'member-tag' }, 'Creator') : u.is_admin ? h('span', { class: 'member-tag' }, 'Admin') : null,
+        h('span', { class: 'member-actions' },
+          iAmCreator && !u.is_creator ? h('button', { class: 'link-btn', type: 'button', 'aria-label': u.is_admin ? `Remove ${u.display_name} as admin` : `Make ${u.display_name} an admin`, onclick: () => setAdmin(u, !u.is_admin) }, u.is_admin ? 'Remove admin' : 'Make admin') : null,
+          u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Report ${u.display_name}`, onclick: () => openReport(u, { context: { type: 'group', id: group.id } }) }, 'Report') : null,
+          iAmCreator && u.id !== S.meId ? h('button', { class: 'link-btn danger', type: 'button', 'aria-label': `Remove ${u.display_name}`, onclick: () => removeMember(u) }, 'Remove') : null)))),
+      group.only_admins_add && !iAmAdmin
+        ? h('p', { class: 'hint add-people' }, 'Only group admins can add people to this group.')
+        : h('button', { class: 'btn sm add-people', type: 'button', onclick: () => { view = 'add'; refreshFriends().then(() => view === 'add' && render()); render(); } }, h('span', { class: 'btn-ic' }, icon('userPlus', 16)), 'Add people'),
+      h('h3', {}, 'Change group name'),
+      group.only_admins_rename && !iAmAdmin ? h('p', { class: 'hint' }, 'Only group admins can change the group name.') : form,
+      msg, ...(rules ? [rules] : []),
       h('div', { class: 'dialog-actions' }, h('button', { class: 'btn danger', type: 'button', onclick: leave }, 'Leave group')));
   }
 
@@ -733,6 +948,14 @@ function connect() {
     renderChatList(false);
   });
   socket.on('connect', () => { refreshFriends(); refreshGroups(); refreshNotif(); });
+  // Tapping a browser notification brings this tab forward and opens that chat.
+  notify.onOpen((o) => {
+    window.focus();
+    if (o.kind === 'group') openGroupChat({ id: o.id, name: o.name });
+    else openChat({ id: o.id, handle: o.handle, display_name: o.name });
+  });
+  // Someone edited, deleted or pinned a message (or I did, in another tab).
+  socket.on('message:changed', ({ kind, group_id: gid, message }) => applyChange(message, kind, gid));
   // The other person opened the chat: show "Seen" under everything of mine they hadn't read.
   socket.on('dm:read', ({ by, at }) => {
     if (S.chat?.user?.id !== by) return;
@@ -763,6 +986,7 @@ function connect() {
   // A new message opens its chat box by itself, unless you're already in another chat (we never swap it out
   // from under you while you type) or it's from someone who isn't your friend (that goes to Spam).
   socket.on('dm:new', (m) => {
+    if (!m.spam) notify.show({ title: m.from.display_name, body: previewText(m.body), tag: `dm-${m.from_id}`, open: { kind: 'dm', id: m.from_id, name: m.from.display_name, handle: m.from.handle } }); // Spam never alerts
     if (S.chat?.user?.id === m.from_id) { appendMsg(m); api('/api/messages/with/' + m.from_id).finally(refreshNotif); }
     else if (!S.chat && !m.spam) openChat({ ...m.from, id: m.from_id }, { focus: false });
     else refreshNotif();
@@ -776,6 +1000,7 @@ function connect() {
     refreshChats(); // the Chats list shows the newest message and order
     if (open) appendMsg(message);
     if (message.kind === 'system') return; // "Sam left" notes never alert
+    if (message.from_id !== S.meId) notify.show({ title: gname, body: `${message.from_name}: ${previewText(message.body)}`, tag: `group-${gid}`, open: { kind: 'group', id: gid, name: gname } });
     if (open) { if (message.from_id !== S.meId) api(`/api/groups/${gid}/read`, { method: 'POST' }).finally(refreshNotif); }
     else if (message.from_id !== S.meId) {
       if (!S.chat) openGroupChat(S.groups.find((x) => x.id === gid) || { id: gid, name: gname }, { focus: false });

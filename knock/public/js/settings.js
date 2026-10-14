@@ -3,6 +3,7 @@ import { mountTopbar } from './topbar.js';
 import { PRESETS, resolve, specOf, toCustom, readability, parseTheme } from './theme-core.js';
 import { setTheme, getTheme, prefersDark } from './theme.js';
 import { ColorWheel } from './colorwheel.js';
+import * as notify from './notify.js';
 
 const { user } = await api('/api/auth/me');
 if (!user) location.replace('/login?next=/settings');
@@ -296,6 +297,39 @@ function chatPrivacy() {
     h('p', { class: 'hint' }, 'Friends see “Seen” under their messages once you’ve opened the chat, and “typing…” while you write. It only works between friends. If you turn this off you also stop seeing it for other people.'));
 }
 
+// Browser notifications: per browser, because the permission is. Only shown while you're not looking at a Knock tab.
+function notifications() {
+  const status = h('p', { class: 'hint', role: 'status' });
+  const toggle = h('button', { type: 'button', class: 'btn sm' });
+  const test = h('button', { type: 'button', class: 'btn sm', onclick: () => notify.test() }, 'Send a test');
+  const preview = h('input', { type: 'checkbox', id: 'notifPreview', checked: notify.previewOn() });
+  preview.addEventListener('change', () => notify.setPreview(preview.checked));
+  const previewRow = h('label', { class: 'check-row', for: 'notifPreview' }, preview, h('span', {}, 'Show the message text in the notification'));
+  function paint() {
+    const perm = notify.permission();
+    const on = notify.enabled();
+    toggle.hidden = perm === 'unsupported' || perm === 'denied';
+    test.hidden = previewRow.hidden = !on;
+    toggle.textContent = on ? 'Turn off' : 'Turn on notifications';
+    status.classList.remove('error');
+    if (perm === 'unsupported') { status.textContent = 'This browser doesn’t support notifications.'; status.classList.add('error'); }
+    else if (perm === 'denied') { status.textContent = 'Notifications are blocked for this site. Allow them in your browser’s site settings, then come back here.'; status.classList.add('error'); }
+    else status.textContent = on ? 'On in this browser. You’ll get a notification for new messages while you’re on another tab or window.' : 'Off in this browser.';
+  }
+  toggle.addEventListener('click', async () => {
+    if (notify.enabled()) notify.disable();
+    else {
+      const result = await notify.enable();
+      if (result === 'default') toast('Notifications weren’t turned on. Choose “Allow” when your browser asks.');
+    }
+    paint();
+  });
+  paint();
+  return section('ntH', 'Notifications',
+    h('p', { class: 'hint' }, 'Get a browser notification when a friend or group messages you while you’re not on this tab. Messages from people who aren’t your friends (Spam) never notify. It works while Knock is open in a tab or window, not while the browser is closed.'),
+    status, previewRow, h('div', { class: 'set-actions' }, toggle, test));
+}
+
 function blocked() {
   const list = h('div', {}, h('p', { class: 'hint' }, 'Loading…'));
   const paint = (people) => list.replaceChildren(people.length
@@ -311,4 +345,4 @@ function blocked() {
   return section('blH', 'Blocked people', h('p', { class: 'hint' }, 'Blocked people can’t message you, send you friend requests, find your profile or join a call you’re in. They aren’t told. Unblocking doesn’t bring a friendship back.'), list);
 }
 
-root.replaceChildren(appearance(), signIn(), details(), names(), chatPrivacy(), blocked(), security());
+root.replaceChildren(appearance(), signIn(), details(), names(), chatPrivacy(), notifications(), blocked(), security());

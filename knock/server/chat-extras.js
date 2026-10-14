@@ -19,10 +19,10 @@ export function saveChatImage(ownerId, mime, data) {
 // Can this person see picture `id`? Only people in the chat that carries it (and, in a group, only if they were
 // already a member when it was sent). Someone who blocked / was blocked by the sender doesn't get it either.
 export function canSeeImage(id, me) {
-  const dm = db.prepare('SELECT from_id, to_id FROM messages WHERE image_id = ?').get(id);
+  const dm = db.prepare('SELECT from_id, to_id FROM messages WHERE image_id = ? AND deleted_at IS NULL').get(id);
   if (dm) return (dm.from_id === me || dm.to_id === me) && !blockedEither(dm.from_id, dm.to_id);
   const gm = db
-    .prepare('SELECT m.from_id FROM group_messages m JOIN group_members g ON g.group_id = m.group_id AND g.user_id = ? WHERE m.image_id = ? AND m.created_at >= g.joined_at')
+    .prepare('SELECT m.from_id FROM group_messages m JOIN group_members g ON g.group_id = m.group_id AND g.user_id = ? WHERE m.image_id = ? AND m.deleted_at IS NULL AND m.created_at >= g.joined_at')
     .get(me, id);
   return !!gm && (gm.from_id === me || !blockedEither(gm.from_id, me));
 }

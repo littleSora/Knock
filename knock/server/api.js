@@ -17,6 +17,34 @@ const limiter = (limit, windowMs = 60_000) => rateLimit({ windowMs, limit, stand
 const sessionLimiter = limiter(30, 3_600_000);
 const socialLimiter = limiter(40);
 
+/* ---------- message tools: shared helpers (edit, delete, pin, search) ---------- */
+const MAX_PINS = 10; // pinned messages per chat
+const WINDOW = 25; // messages shown either side of a search hit
+const escapeLike = (s) => s.replace(/[\\%_]/g, (c) => '\\' + c);
+const searchTerm = (q) => {
+  const s = String(q ?? '').trim().slice(0, 100);
+  return s.length >= 2 ? s : null;
+};
+// What a browser may see of a stored message. A deleted message keeps its place in the chat but none of its content.
+function shapeMessage(row) {
+  const { deleted_at, pinned_at, pinned_by, ...m } = row;
+  if (deleted_at) return { ...m, body: '', image_id: null, edited_at: null, deleted: true, pinned: false, reactions: [] };
+  return { ...m, deleted: false, pinned: !!pinned_at };
+}
+// Deleting keeps the text in the database (a report may need to quote it) but nobody is sent it again. A picture is removed for good.
+function removeMessage(table, kind, m) {
+  db.exec('BEGIN');
+  try {
+    db.prepare(`UPDATE ${table} SET deleted_at = ?, edited_at = NULL, pinned_at = NULL, pinned_by = NULL, image_id = NULL WHERE id = ?`).run(Date.now(), m.id);
+    db.prepare('DELETE FROM reactions WHERE kind = ? AND message_id = ?').run(kind, m.id);
+    if (m.image_id) db.prepare('DELETE FROM chat_images WHERE id = ?').run(m.image_id);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
 /* ---------- public-by-design config (secrets never appear here) ---------- */
 api.get('/config', (_req, res) => res.json({ googleClientId: process.env.GOOGLE_CLIENT_ID || null, devMode: !isProd }));
 
@@ -428,10 +456,10 @@ function reportContext(me, target, ctx) {
   const type = ctx?.type;
   if (type === 'dm') {
     const rows = db
-      .prepare('SELECT from_id, body, created_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT ?')
+      .prepare('SELECT from_id, body, created_at, deleted_at FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT ?')
       .all(me, target, target, me, EVIDENCE_MESSAGES)
       .reverse()
-      .map((m) => ({ from: m.from_id === me ? 'reporter' : 'reported', body: m.body, at: m.created_at }));
+      .map((m) => ({ from: m.from_id === me ? 'reporter' : 'reported', body: m.body, at: m.created_at, ...(m.deleted_at ? { deleted: true } : {}) }));
     return { type: 'dm', ref: null, evidence: rows.length ? rows : null };
   }
   if (type === 'group') {
@@ -439,10 +467,10 @@ function reportContext(me, target, ctx) {
     const mine = Number.isInteger(gid) && db.prepare('SELECT joined_at FROM group_members WHERE group_id = ? AND user_id = ?').get(gid, me);
     if (!mine || !isMember(gid, target)) return none; // not a group they share: treat as a plain profile report
     const rows = db
-      .prepare("SELECT from_id, body, created_at FROM group_messages WHERE group_id = ? AND kind = 'msg' AND created_at >= ? ORDER BY id DESC LIMIT ?")
+      .prepare("SELECT from_id, body, created_at, deleted_at FROM group_messages WHERE group_id = ? AND kind = 'msg' AND created_at >= ? ORDER BY id DESC LIMIT ?")
       .all(gid, mine.joined_at, EVIDENCE_MESSAGES)
       .reverse()
-      .map((m) => ({ from: m.from_id === me ? 'reporter' : m.from_id === target ? 'reported' : 'other', body: m.body, at: m.created_at }));
+      .map((m) => ({ from: m.from_id === me ? 'reporter' : m.from_id === target ? 'reported' : 'other', body: m.body, at: m.created_at, ...(m.deleted_at ? { deleted: true } : {}) }));
     return { type: 'group', ref: String(gid), evidence: rows.length ? rows : null };
   }
   if (type === 'call') {
@@ -490,7 +518,7 @@ function dmAllowed(req, res, to) {
 function deliverDm(req, res, to, body, imageId = null) {
   const now = Date.now();
   const info = db.prepare('INSERT INTO messages(from_id, to_id, body, created_at, image_id) VALUES (?,?,?,?,?)').run(req.user.id, to, body, now, imageId);
-  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now, image_id: imageId, reactions: [] };
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now, image_id: imageId, edited_at: null, deleted: false, pinned: false, reactions: [] };
   const spam = !db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(to, req.user.id);
   emitTo(to, 'dm:new', { ...message, from: req.user, spam });
   emitTo(req.user.id, 'dm:echo', message); // keeps the sender's other tabs in sync
@@ -518,8 +546,8 @@ api.put('/messages/:id/react', needUser, limiter(60), (req, res) => {
   const id = Number(req.params.id);
   const emoji = String(req.body?.emoji ?? '');
   if (!isReactionEmoji(emoji)) return res.status(400).json({ error: 'invalid_reaction' });
-  const m = Number.isInteger(id) ? db.prepare('SELECT from_id, to_id FROM messages WHERE id = ?').get(id) : null;
-  if (!m || (m.from_id !== me && m.to_id !== me)) return res.status(404).json({ error: 'message_not_found' });
+  const m = Number.isInteger(id) ? db.prepare('SELECT from_id, to_id, deleted_at FROM messages WHERE id = ?').get(id) : null;
+  if (!m || m.deleted_at || (m.from_id !== me && m.to_id !== me)) return res.status(404).json({ error: 'message_not_found' });
   const other = m.from_id === me ? m.to_id : m.from_id;
   if (blockedEither(me, other)) return res.status(403).json({ error: 'cannot_contact' });
   toggleReaction('dm', id, me, emoji);
@@ -540,18 +568,122 @@ api.get('/messages/with/:id', needUser, (req, res) => {
   const me = req.user.id;
   const other = Number(req.params.id);
   const share = shareActivity(me, other);
-  const messages = db
-    .prepare('SELECT id, from_id, to_id, body, created_at, read_at, image_id FROM messages WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?) ORDER BY id DESC LIMIT 50')
-    .all(me, other, other, me)
-    .reverse()
+  const pair = '((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))';
+  const cols = 'id, from_id, to_id, body, created_at, read_at, image_id, edited_at, deleted_at, pinned_at, pinned_by';
+  // ?around=<message id> loads the stretch of conversation around a search hit instead of the newest messages.
+  const around = Number(req.query.around);
+  const windowed = Number.isInteger(around) && around > 0;
+  let rows;
+  let latest = true;
+  if (windowed) {
+    const before = db.prepare(`SELECT ${cols} FROM messages WHERE ${pair} AND id <= ? ORDER BY id DESC LIMIT ${WINDOW + 1}`).all(me, other, other, me, around);
+    const after = db.prepare(`SELECT ${cols} FROM messages WHERE ${pair} AND id > ? ORDER BY id ASC LIMIT ${WINDOW + 1}`).all(me, other, other, me, around);
+    latest = after.length <= WINDOW;
+    rows = [...before.reverse(), ...after.slice(0, WINDOW)];
+  } else {
+    rows = db.prepare(`SELECT ${cols} FROM messages WHERE ${pair} ORDER BY id DESC LIMIT 50`).all(me, other, other, me).reverse();
+  }
+  const messages = rows
+    .map(shapeMessage)
     // "Seen" is only for my own messages, and only when both of us share it. Nobody's read time is shown for other people's messages.
     .map(({ read_at, ...m }) => (m.from_id === me ? { ...m, read_at: share ? read_at : null } : m));
   const rx = loadReactions('dm', messages.map((m) => m.id), me);
-  for (const m of messages) m.reactions = rx.get(m.id) ?? [];
-  const now = Date.now();
-  const marked = db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL').run(now, me, other).changes;
-  if (marked && share) emitTo(other, 'dm:read', { by: me, at: now }); // their "Seen" appears live
-  res.json({ messages });
+  for (const m of messages) if (!m.deleted) m.reactions = rx.get(m.id) ?? [];
+  const pins = db
+    .prepare(`SELECT ${cols} FROM messages WHERE ${pair} AND pinned_at IS NOT NULL AND deleted_at IS NULL ORDER BY pinned_at DESC LIMIT ${MAX_PINS}`)
+    .all(me, other, other, me)
+    .map(shapeMessage)
+    .map(({ read_at, ...m }) => m);
+  if (!windowed) {
+    const now = Date.now(); // looking at a search hit in the middle of the history doesn't count as reading the newest messages
+    const marked = db.prepare('UPDATE messages SET read_at = ? WHERE to_id = ? AND from_id = ? AND read_at IS NULL').run(now, me, other).changes;
+    if (marked && share) emitTo(other, 'dm:read', { by: me, at: now }); // their "Seen" appears live
+  }
+  res.json({ messages, pins, latest });
+});
+
+// Search this conversation (newest hits first). Deleted messages are never searched.
+api.get('/messages/with/:id/search', needUser, limiter(60), (req, res) => {
+  const me = req.user.id;
+  const other = Number(req.params.id);
+  const q = searchTerm(req.query.q);
+  if (!Number.isInteger(other) || !q) return res.json({ results: [] });
+  const results = db
+    .prepare(
+      `SELECT id, from_id, body, created_at FROM messages
+       WHERE ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)) AND deleted_at IS NULL AND body LIKE ? ESCAPE '\\'
+       ORDER BY id DESC LIMIT 30`,
+    )
+    .all(me, other, other, me, `%${escapeLike(q)}%`);
+  res.json({ results });
+});
+
+/* ---------- edit, delete and pin a direct message ---------- */
+// A message I'm part of; 404 if it isn't, or if it was deleted.
+function dmFor(req, res) {
+  const id = Number(req.params.id);
+  const m = Number.isInteger(id) ? db.prepare('SELECT * FROM messages WHERE id = ?').get(id) : null;
+  if (!m || m.deleted_at || (m.from_id !== req.user.id && m.to_id !== req.user.id)) { res.status(404).json({ error: 'message_not_found' }); return null; }
+  return m;
+}
+const dmOtherOf = (m, me) => (m.from_id === me ? m.to_id : m.from_id);
+// What the browser gets after a change. No read_at: the "Seen" line is handled separately, so it never gets overwritten.
+function dmPayload(id, viewer) {
+  const { read_at, ...m } = shapeMessage(db.prepare('SELECT * FROM messages WHERE id = ?').get(id));
+  if (!m.deleted) m.reactions = loadReactions('dm', [id], viewer).get(id) ?? [];
+  return m;
+}
+// Both people see the change live (and so do my other tabs). Someone with a block between you is told nothing.
+function announceDmChange(m, me, { unread = false } = {}) {
+  const other = dmOtherOf(m, me);
+  emitTo(me, 'message:changed', { kind: 'dm', message: dmPayload(m.id, me) });
+  if (blockedEither(me, other)) return;
+  emitTo(other, 'message:changed', { kind: 'dm', message: dmPayload(m.id, other) });
+  if (unread) emitTo(other, 'notif:new', { type: 'message_deleted' }); // their unread count may have dropped
+}
+api.patch('/messages/:id', needUser, limiter(60), (req, res) => {
+  const me = req.user.id;
+  const m = dmFor(req, res);
+  if (!m) return;
+  if (m.from_id !== me) return res.status(403).json({ error: 'not_message_owner' });
+  if (m.image_id && m.body === IMAGE_BODY) return res.status(400).json({ error: 'invalid_edit' }); // a picture with no caption has no text to edit
+  const body = cleanBody(req.body?.body, 2000);
+  if (!body) return res.status(400).json({ error: 'invalid_message' });
+  const other = dmOtherOf(m, me);
+  if (hasBlocked(me, other)) return res.status(403).json({ error: 'unblock_first' });
+  if (hasBlocked(other, me)) return res.status(403).json({ error: 'cannot_contact' });
+  if (body !== m.body) {
+    db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?').run(body, Date.now(), m.id);
+    announceDmChange(m, me);
+  }
+  res.json({ message: dmPayload(m.id, me) });
+});
+// Delete for everyone. Only the sender can; it still works if the other person has blocked you (they just aren't told).
+api.delete('/messages/:id', needUser, limiter(60), (req, res) => {
+  const me = req.user.id;
+  const m = dmFor(req, res);
+  if (!m) return;
+  if (m.from_id !== me) return res.status(403).json({ error: 'not_message_owner' });
+  removeMessage('messages', 'dm', m);
+  announceDmChange(m, me, { unread: true });
+  res.json({ message: dmPayload(m.id, me) });
+});
+// Pin or unpin. Either person in the chat can; both see the pins.
+api.put('/messages/:id/pin', needUser, limiter(60), (req, res) => {
+  const me = req.user.id;
+  const m = dmFor(req, res);
+  if (!m) return;
+  const other = dmOtherOf(m, me);
+  if (blockedEither(me, other)) return res.status(403).json({ error: 'cannot_contact' });
+  if (req.body?.pinned !== false) {
+    if (!m.pinned_at) {
+      const n = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)) AND pinned_at IS NOT NULL AND deleted_at IS NULL').get(me, other, other, me).n;
+      if (n >= MAX_PINS) return res.status(400).json({ error: 'too_many_pins' });
+      db.prepare('UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ?').run(Date.now(), me, m.id);
+    }
+  } else db.prepare('UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?').run(m.id);
+  announceDmChange(m, me);
+  res.json({ message: dmPayload(m.id, me) });
 });
 
 api.get('/notifications', needUser, (req, res) => {
@@ -559,10 +691,10 @@ api.get('/notifications', needUser, (req, res) => {
   const threads = db
     .prepare(
       `SELECT m.from_id AS id, u.handle, u.display_name, m.body, m.created_at,
-         (SELECT COUNT(*) FROM messages x WHERE x.to_id = ? AND x.from_id = m.from_id AND x.read_at IS NULL) AS unread,
+         (SELECT COUNT(*) FROM messages x WHERE x.to_id = ? AND x.from_id = m.from_id AND x.read_at IS NULL AND x.deleted_at IS NULL) AS unread,
          EXISTS (SELECT 1 FROM friends f WHERE f.user_id = ? AND f.friend_id = m.from_id) AS is_friend
        FROM messages m JOIN users u ON u.id = m.from_id
-       WHERE m.id IN (SELECT MAX(id) FROM messages WHERE to_id = ? GROUP BY from_id)
+       WHERE m.id IN (SELECT MAX(id) FROM messages WHERE to_id = ? AND deleted_at IS NULL GROUP BY from_id)
          AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = ? AND b.blocked_id = m.from_id)
        ORDER BY m.id DESC LIMIT 50`,
     )
@@ -628,7 +760,7 @@ const groupFor = (req, res) => {
   const g = Number.isInteger(id)
     ? db
         .prepare(
-          `SELECT g.id, g.name, g.created_by, g.created_at, m.joined_at, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at FROM group_chats g
+          `SELECT g.id, g.name, g.created_by, g.created_at, g.only_admins_rename, g.only_admins_add, m.joined_at, m.is_admin AS my_admin, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at FROM group_chats g
            JOIN group_members m ON m.group_id = g.id AND m.user_id = ? WHERE g.id = ?`,
         )
         .get(req.user.id, id)
@@ -636,6 +768,8 @@ const groupFor = (req, res) => {
   if (!g) { res.status(404).json({ error: 'group_not_found' }); return null; }
   return g;
 };
+// The creator is always an admin; others only if the creator made them one.
+const isGroupAdmin = (g, userId) => g.created_by === userId || !!g.my_admin;
 const markGroupRead = (groupId, userId) =>
   db
     .prepare('UPDATE group_members SET last_read_id = (SELECT COALESCE(MAX(id), 0) FROM group_messages WHERE group_id = ?) WHERE group_id = ? AND user_id = ?')
@@ -665,12 +799,12 @@ function unreadGroups(me) {
   const rows = db
     .prepare(
       `SELECT g.id, g.name,
-         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg') AS unread
+         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg' AND x.deleted_at IS NULL) AS unread
        FROM group_chats g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?`,
     )
     .all(me, me)
     .filter((r) => r.unread > 0);
-  const last = db.prepare("SELECT u.display_name AS from_name, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' ORDER BY x.id DESC LIMIT 1");
+  const last = db.prepare("SELECT u.display_name AS from_name, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' AND x.deleted_at IS NULL ORDER BY x.id DESC LIMIT 1");
   return rows.map((r) => ({ ...r, ...last.get(r.id) })).sort((a, b) => b.created_at - a.created_at);
 }
 
@@ -725,13 +859,13 @@ api.get('/groups/:id', needUser, (req, res) => {
   if (!g) return;
   const members = db
     .prepare(
-      `SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at, m.joined_at
+      `SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at, m.joined_at, m.is_admin
        FROM group_members m JOIN users u ON u.id = m.user_id WHERE m.group_id = ? ORDER BY m.joined_at, u.id`,
     )
     .all(g.id)
-    .map((u) => ({ ...u, is_creator: u.id === g.created_by }));
-  const { joined_at, ...group } = g;
-  res.json({ group, members });
+    .map((u) => ({ ...u, is_creator: u.id === g.created_by, is_admin: u.id === g.created_by || !!u.is_admin }));
+  const { joined_at, my_admin, ...group } = g;
+  res.json({ group: { ...group, only_admins_rename: !!g.only_admins_rename, only_admins_add: !!g.only_admins_add, me_admin: isGroupAdmin(g, req.user.id) }, members });
 });
 
 // The group picture: any member can set or remove it (like renaming). Same cropper and limits as profile pictures.
@@ -767,10 +901,11 @@ api.delete('/groups/:id/avatar', needUser, limiter(10), (req, res) => {
   res.json({ ok: true, avatar_at: null });
 });
 
-// Any member can rename the group.
+// Any member can rename the group, unless the creator limited renaming to admins.
 api.patch('/groups/:id', needUser, socialLimiter, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
+  if (g.only_admins_rename && !isGroupAdmin(g, req.user.id)) return res.status(403).json({ error: 'admins_only' });
   const name = cleanName(req.body?.name, 40);
   if (!name) return res.status(400).json({ error: 'invalid_group' });
   db.prepare('UPDATE group_chats SET name = ? WHERE id = ?').run(name, g.id);
@@ -783,6 +918,7 @@ api.post('/groups/:id/members', needUser, socialLimiter, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
   const me = req.user.id;
+  if (g.only_admins_add && !isGroupAdmin(g, me)) return res.status(403).json({ error: 'admins_only' });
   const ids = [...new Set((Array.isArray(req.body?.memberIds) ? req.body.memberIds : []).map(Number))].filter((n) => Number.isInteger(n) && n !== me);
   if (!ids.length) return res.status(400).json({ error: 'invalid_group' });
   const current = new Set(memberIds(g.id));
@@ -826,7 +962,7 @@ api.delete('/groups/:id/members/:userId', needUser, socialLimiter, (req, res) =>
     remaining = memberIds(g.id);
     if (!remaining.length) db.prepare('DELETE FROM group_chats WHERE id = ?').run(g.id); // messages go with it
     else if (g.created_by === target) {
-      const heir = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? ORDER BY joined_at, user_id LIMIT 1').get(g.id).user_id;
+      const heir = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? ORDER BY is_admin DESC, joined_at, user_id LIMIT 1').get(g.id).user_id;
       db.prepare('UPDATE group_chats SET created_by = ? WHERE id = ?').run(heir, g.id);
     }
     db.exec('COMMIT');
@@ -842,6 +978,45 @@ api.delete('/groups/:id/members/:userId', needUser, socialLimiter, (req, res) =>
   res.json({ ok: true });
 });
 
+// Roles and rules. Only the creator can change them. The creator is always an admin; admins can rename the group and add people
+// even when the creator has limited those to admins. Removing people stays with the creator.
+api.put('/groups/:id/settings', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  if (g.created_by !== req.user.id) return res.status(403).json({ error: 'creator_only' });
+  const b = req.body ?? {};
+  const notes = [];
+  for (const [key, on, off] of [
+    ['only_admins_rename', 'made renaming the group admin-only', 'let everyone rename the group'],
+    ['only_admins_add', 'made adding people admin-only', 'let everyone add people'],
+  ]) {
+    if (typeof b[key] !== 'boolean') continue;
+    const next = b[key] ? 1 : 0;
+    if (next === g[key]) continue;
+    db.prepare(`UPDATE group_chats SET ${key} = ? WHERE id = ?`).run(next, g.id);
+    notes.push(`${req.user.display_name} ${next ? on : off}`);
+  }
+  for (const text of notes) groupNote(g, req.user.id, text);
+  if (notes.length) for (const id of memberIds(g.id)) emitTo(id, 'group:members', { group_id: g.id }); // open info cards reload
+  res.json({ ok: true });
+});
+api.put('/groups/:id/members/:userId/admin', needUser, socialLimiter, (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  if (g.created_by !== req.user.id) return res.status(403).json({ error: 'creator_only' });
+  const target = Number(req.params.userId);
+  if (!Number.isInteger(target) || !isMember(g.id, target)) return res.status(404).json({ error: 'member_not_found' });
+  if (target === g.created_by) return res.status(400).json({ error: 'invalid_user' }); // the creator is always an admin
+  const admin = req.body?.admin === true;
+  const changed = db.prepare('UPDATE group_members SET is_admin = ? WHERE group_id = ? AND user_id = ? AND is_admin <> ?').run(admin ? 1 : 0, g.id, target, admin ? 1 : 0).changes;
+  if (changed) {
+    const name = db.prepare('SELECT display_name FROM users WHERE id = ?').get(target).display_name;
+    groupNote(g, req.user.id, admin ? `${req.user.display_name} made ${name} an admin` : `${req.user.display_name} removed ${name} as an admin`);
+    for (const id of memberIds(g.id)) emitTo(id, 'group:members', { group_id: g.id });
+  }
+  res.json({ ok: true, admin });
+});
+
 api.post('/groups/:id/read', needUser, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
@@ -850,28 +1025,122 @@ api.post('/groups/:id/read', needUser, (req, res) => {
   res.json({ ok: true });
 });
 
-// Opening a group's messages marks them read.
+// Opening a group's messages marks them read. ?around=<message id> loads the stretch around a search hit instead.
 api.get('/groups/:id/messages', needUser, (req, res) => {
   const g = groupFor(req, res);
   if (!g) return;
-  const messages = db
-    .prepare(
-      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at, m.kind, m.image_id
-       FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? AND m.created_at >= ? ORDER BY m.id DESC LIMIT 50`,
-    )
-    .all(g.id, g.joined_at)
-    .reverse();
+  const cols = 'm.id, m.from_id, u.display_name AS from_name, m.body, m.created_at, m.kind, m.image_id, m.edited_at, m.deleted_at, m.pinned_at, m.pinned_by';
+  const from = 'FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.group_id = ? AND m.created_at >= ?';
+  const around = Number(req.query.around);
+  const windowed = Number.isInteger(around) && around > 0;
+  let rows;
+  let latest = true;
+  if (windowed) {
+    const before = db.prepare(`SELECT ${cols} ${from} AND m.id <= ? ORDER BY m.id DESC LIMIT ${WINDOW + 1}`).all(g.id, g.joined_at, around);
+    const after = db.prepare(`SELECT ${cols} ${from} AND m.id > ? ORDER BY m.id ASC LIMIT ${WINDOW + 1}`).all(g.id, g.joined_at, around);
+    latest = after.length <= WINDOW;
+    rows = [...before.reverse(), ...after.slice(0, WINDOW)];
+  } else {
+    rows = db.prepare(`SELECT ${cols} ${from} ORDER BY m.id DESC LIMIT 50`).all(g.id, g.joined_at).reverse();
+  }
+  const messages = rows.map(shapeMessage);
   const rx = loadReactions('group', messages.map((m) => m.id), req.user.id);
-  for (const m of messages) m.reactions = rx.get(m.id) ?? [];
-  markGroupRead(g.id, req.user.id);
-  announceGroupRead(g.id, req.user.id);
-  res.json({ messages, reads: groupReads(g.id, req.user.id) });
+  for (const m of messages) if (!m.deleted) m.reactions = rx.get(m.id) ?? [];
+  const pins = db
+    .prepare(`SELECT ${cols} ${from} AND m.pinned_at IS NOT NULL AND m.deleted_at IS NULL ORDER BY m.pinned_at DESC LIMIT ${MAX_PINS}`)
+    .all(g.id, g.joined_at)
+    .map(shapeMessage);
+  if (!windowed) {
+    markGroupRead(g.id, req.user.id);
+    announceGroupRead(g.id, req.user.id);
+  }
+  res.json({ messages, pins, latest, reads: groupReads(g.id, req.user.id) });
+});
+
+// Search this group's messages from the time you joined (newest hits first). Deleted messages and notes are never searched.
+api.get('/groups/:id/messages/search', needUser, limiter(60), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const q = searchTerm(req.query.q);
+  if (!q) return res.json({ results: [] });
+  const results = db
+    .prepare(
+      `SELECT m.id, m.from_id, u.display_name AS from_name, m.body, m.created_at
+       FROM group_messages m JOIN users u ON u.id = m.from_id
+       WHERE m.group_id = ? AND m.created_at >= ? AND m.kind = 'msg' AND m.deleted_at IS NULL AND m.body LIKE ? ESCAPE '\\'
+       ORDER BY m.id DESC LIMIT 30`,
+    )
+    .all(g.id, g.joined_at, `%${escapeLike(q)}%`);
+  res.json({ results });
+});
+
+/* ---------- edit, delete and pin a group message ---------- */
+// A real message (not a note) in this group that I could see; 404 otherwise or if it was deleted.
+function groupMsgFor(req, res, g) {
+  const mid = Number(req.params.mid);
+  const m = Number.isInteger(mid) ? db.prepare("SELECT * FROM group_messages WHERE id = ? AND group_id = ? AND kind = 'msg'").get(mid, g.id) : null;
+  if (!m || m.deleted_at || m.created_at < g.joined_at) { res.status(404).json({ error: 'message_not_found' }); return null; }
+  return m;
+}
+function groupPayload(id, viewer) {
+  const m = shapeMessage(db.prepare('SELECT m.*, u.display_name AS from_name FROM group_messages m JOIN users u ON u.id = m.from_id WHERE m.id = ?').get(id));
+  if (!m.deleted) m.reactions = loadReactions('group', [id], viewer).get(id) ?? [];
+  return m;
+}
+// Everyone who was in the group when the message was sent sees the change live (as with reactions).
+function announceGroupChange(g, m, { unread = false } = {}) {
+  const viewers = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND joined_at <= ?').all(g.id, m.created_at).map((r) => r.user_id);
+  for (const uid of viewers) {
+    emitTo(uid, 'message:changed', { kind: 'group', group_id: g.id, message: groupPayload(m.id, uid) });
+    if (unread && uid !== m.from_id) emitTo(uid, 'notif:new', { type: 'message_deleted' });
+  }
+}
+api.patch('/groups/:id/messages/:mid', needUser, limiter(60), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const m = groupMsgFor(req, res, g);
+  if (!m) return;
+  if (m.from_id !== req.user.id) return res.status(403).json({ error: 'not_message_owner' });
+  if (m.image_id && m.body === IMAGE_BODY) return res.status(400).json({ error: 'invalid_edit' });
+  const body = cleanBody(req.body?.body, 2000);
+  if (!body) return res.status(400).json({ error: 'invalid_message' });
+  if (body !== m.body) {
+    db.prepare('UPDATE group_messages SET body = ?, edited_at = ? WHERE id = ?').run(body, Date.now(), m.id);
+    announceGroupChange(g, m);
+  }
+  res.json({ message: groupPayload(m.id, req.user.id) });
+});
+api.delete('/groups/:id/messages/:mid', needUser, limiter(60), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const m = groupMsgFor(req, res, g);
+  if (!m) return;
+  if (m.from_id !== req.user.id) return res.status(403).json({ error: 'not_message_owner' });
+  removeMessage('group_messages', 'group', m);
+  announceGroupChange(g, m, { unread: true });
+  res.json({ message: groupPayload(m.id, req.user.id) });
+});
+// Any member can pin or unpin.
+api.put('/groups/:id/messages/:mid/pin', needUser, limiter(60), (req, res) => {
+  const g = groupFor(req, res);
+  if (!g) return;
+  const m = groupMsgFor(req, res, g);
+  if (!m) return;
+  if (req.body?.pinned !== false) {
+    if (!m.pinned_at) {
+      const n = db.prepare('SELECT COUNT(*) AS n FROM group_messages WHERE group_id = ? AND pinned_at IS NOT NULL AND deleted_at IS NULL').get(g.id).n;
+      if (n >= MAX_PINS) return res.status(400).json({ error: 'too_many_pins' });
+      db.prepare('UPDATE group_messages SET pinned_at = ?, pinned_by = ? WHERE id = ?').run(Date.now(), req.user.id, m.id);
+    }
+  } else db.prepare('UPDATE group_messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?').run(m.id);
+  announceGroupChange(g, m);
+  res.json({ message: groupPayload(m.id, req.user.id) });
 });
 
 function deliverGroupMessage(g, req, res, body, imageId = null) {
   const now = Date.now();
   const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at, image_id) VALUES (?,?,?,?,?)').run(g.id, req.user.id, body, now, imageId);
-  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg', image_id: imageId, reactions: [] };
+  const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg', image_id: imageId, edited_at: null, deleted: false, pinned: false, reactions: [] };
   for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
   res.json({ message });
 }
@@ -898,8 +1167,8 @@ api.put('/groups/:id/messages/:mid/react', needUser, limiter(60), (req, res) => 
   const mid = Number(req.params.mid);
   const emoji = String(req.body?.emoji ?? '');
   if (!isReactionEmoji(emoji)) return res.status(400).json({ error: 'invalid_reaction' });
-  const m = Number.isInteger(mid) ? db.prepare('SELECT from_id, created_at, kind FROM group_messages WHERE id = ? AND group_id = ?').get(mid, g.id) : null;
-  if (!m || m.kind !== 'msg' || m.created_at < g.joined_at) return res.status(404).json({ error: 'message_not_found' });
+  const m = Number.isInteger(mid) ? db.prepare('SELECT from_id, created_at, kind, deleted_at FROM group_messages WHERE id = ? AND group_id = ?').get(mid, g.id) : null;
+  if (!m || m.kind !== 'msg' || m.deleted_at || m.created_at < g.joined_at) return res.status(404).json({ error: 'message_not_found' });
   if (m.from_id !== me && blockedEither(me, m.from_id)) return res.status(403).json({ error: 'cannot_contact' });
   toggleReaction('group', mid, me, emoji);
   const viewers = db.prepare('SELECT user_id FROM group_members WHERE group_id = ? AND joined_at <= ?').all(g.id, m.created_at).map((r) => r.user_id);
@@ -915,8 +1184,8 @@ api.get('/chats', needUser, (req, res) => {
   const dms = db
     .prepare(
       `SELECT p.other AS id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at,
-         m.body, m.from_id, m.created_at,
-         (SELECT COUNT(*) FROM messages x WHERE x.to_id = ? AND x.from_id = p.other AND x.read_at IS NULL) AS unread
+         m.body, m.deleted_at, m.from_id, m.created_at,
+         (SELECT COUNT(*) FROM messages x WHERE x.to_id = ? AND x.from_id = p.other AND x.read_at IS NULL AND x.deleted_at IS NULL) AS unread
        FROM (SELECT CASE WHEN from_id = ? THEN to_id ELSE from_id END AS other, MAX(id) AS last_id
              FROM messages WHERE from_id = ? OR to_id = ? GROUP BY other) p
        JOIN messages m ON m.id = p.last_id
@@ -925,19 +1194,19 @@ api.get('/chats', needUser, (req, res) => {
        ORDER BY m.id DESC LIMIT 100`,
     )
     .all(me, me, me, me, me)
-    .map((r) => ({ type: 'dm', id: r.id, handle: r.handle, display_name: r.display_name, avatar_at: r.avatar_at, preview: r.body, mine: r.from_id === me, at: r.created_at, unread: r.unread }));
-  const lastMsg = db.prepare("SELECT u.display_name AS from_name, x.from_id, x.body, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' AND x.created_at >= ? ORDER BY x.id DESC LIMIT 1");
+    .map((r) => ({ type: 'dm', id: r.id, handle: r.handle, display_name: r.display_name, avatar_at: r.avatar_at, preview: r.deleted_at ? '' : r.body, mine: r.from_id === me, at: r.created_at, unread: r.unread }));
+  const lastMsg = db.prepare("SELECT u.display_name AS from_name, x.from_id, x.body, x.deleted_at, x.created_at FROM group_messages x JOIN users u ON u.id = x.from_id WHERE x.group_id = ? AND x.kind = 'msg' AND x.created_at >= ? ORDER BY x.id DESC LIMIT 1");
   const groups = db
     .prepare(
       `SELECT g.id, g.name, g.created_at, m.joined_at, (SELECT updated_at FROM group_avatars WHERE group_id = g.id) AS avatar_at,
          (SELECT COUNT(*) FROM group_members z WHERE z.group_id = g.id) AS member_count,
-         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg') AS unread
+         (SELECT COUNT(*) FROM group_messages x WHERE x.group_id = g.id AND x.id > m.last_read_id AND x.created_at >= m.joined_at AND x.from_id <> ? AND x.kind = 'msg' AND x.deleted_at IS NULL) AS unread
        FROM group_chats g JOIN group_members m ON m.group_id = g.id WHERE m.user_id = ?`,
     )
     .all(me, me)
     .map((g) => {
       const l = lastMsg.get(g.id, g.joined_at);
-      return { type: 'group', id: g.id, name: g.name, avatar_at: g.avatar_at, member_count: g.member_count, preview: l ? l.body : null, from_name: l?.from_name ?? null, mine: l ? l.from_id === me : false, at: l ? l.created_at : g.created_at, unread: g.unread };
+      return { type: 'group', id: g.id, name: g.name, avatar_at: g.avatar_at, member_count: g.member_count, preview: l ? (l.deleted_at ? '' : l.body) : null, from_name: l?.from_name ?? null, mine: l ? l.from_id === me : false, at: l ? l.created_at : g.created_at, unread: g.unread };
     });
   res.json({ chats: [...dms, ...groups].sort((a, b) => b.at - a.at) });
 });

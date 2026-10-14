@@ -42,6 +42,9 @@ const ICONS = {
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="9.5" r="1.7"/><path d="m21 16-5.5-5.5L7 19"/>',
   smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.2s1.2 1.8 3.5 1.8 3.5-1.8 3.5-1.8M9.2 9.6h.01M14.8 9.6h.01"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>',
+  pin: '<path d="M9 4h6l-1 6 3 3H7l3-3Z"/><path d="M12 13v7"/>',
+  more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
 };
 export function icon(name, size = 20) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -113,6 +116,12 @@ const MESSAGES = {
   message_not_found: 'That message isn’t available any more.',
   invalid_initial: 'The initial should be a single letter.',
   invalid_birthday: 'Enter a real birthday that isn’t in the future.',
+  not_message_owner: 'You can only change your own messages.',
+  invalid_edit: 'A picture with no caption has no text to edit.',
+  too_many_pins: 'You can pin up to 10 messages in a chat. Unpin one first.',
+  admins_only: 'Only group admins can do that in this group.',
+  creator_only: 'Only the person who created the group can do that.',
+  invalid_user: 'That person isn’t available.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
 
