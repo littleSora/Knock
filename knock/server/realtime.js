@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import { parseCookie } from 'cookie';
 import cookieParser from 'cookie-parser';
-import { db, sessionInfo, endSession, blockedEither, activityOn, shareActivity } from './db.js';
+import { db, sessionInfo, endSession, isStandingSession, blockedEither, activityOn, shareActivity, statusOf, saveStatus, clearStatus } from './db.js';
 import { cfg } from './env.js';
 import { userFromToken } from './auth.js';
 import { isHuman } from './security.js';
@@ -36,6 +36,35 @@ function broadcastPresence(userId, isOn) {
   for (const w of watchers.all(userId)) emitTo(w.user_id, 'presence', { id: userId, online: isOn });
 }
 
+/* ---------- status: tell friends (and my other tabs), and set "In a meeting" by itself while I'm in a call ---------- */
+export function announceStatus(userId) {
+  const status = statusOf(userId);
+  const ids = new Set([userId, ...watchers.all(userId).map((r) => r.user_id)]);
+  for (const id of ids) if (id === userId || !blockedEither(id, userId)) emitTo(id, 'status', { id: userId, status });
+  return status;
+}
+export const isInCall = (userId) => { for (const room of rooms.values()) for (const m of room.values()) if (m.userId === userId) return true; return false; };
+// Call after someone joins or leaves a call. In a call: "In a meeting" (replacing an automatic "Away", never something they picked).
+// Not in a call: an automatic "In a meeting" goes away again.
+export function syncCallStatus(userId) {
+  if (userId == null) return;
+  const s = statusOf(userId);
+  if (isInCall(userId)) {
+    if (s && (!s.auto || s.kind === 'meeting')) return;
+    saveStatus(userId, 'meeting', { auto: true });
+    announceStatus(userId);
+  } else if (s?.auto && s.kind === 'meeting') {
+    clearStatus(userId);
+    announceStatus(userId);
+  }
+}
+// A status you picked with "clear after" can run out while you're still in the call: pick the automatic one back up.
+function resyncCalls() {
+  const ids = new Set();
+  for (const room of rooms.values()) for (const m of room.values()) if (m.userId) ids.add(m.userId);
+  ids.forEach(syncCallStatus);
+}
+
 function logCall(sessionId, room) {
   const now = Date.now();
   for (const m of room.values()) if (m.userId) insertCall.run(m.userId, sessionId, Math.floor(now / 86_400_000), now);
@@ -51,6 +80,7 @@ function leaveRoom(socket) {
   room.delete(socket.id);
   socket.to(`r:${id}`).emit('room:peer-left', { id: socket.id });
   if (!room.size) rooms.delete(id);
+  syncCallStatus(socket.data.user?.id);
 }
 
 // The host is the session's owner (signed-in creator) or whoever holds the signed host cookie made when they created it.
@@ -88,6 +118,7 @@ function joinRoom(socket, p = {}, ack) {
   socket.join(`r:${id}`);
   socket.to(`r:${id}`).emit('room:peer-joined', { id: socket.id, nickname, handle, avatarAt });
   if (room.size >= 2) logCall(id, room);
+  syncCallStatus(user?.id);
   reply({ ok: true, selfId: socket.id, nickname, host, peers, recap: recapItems.all(id).map(publicRecap) });
 }
 
@@ -194,12 +225,13 @@ function onConnect(socket) {
     const ctx = inRoom();
     if (!ctx || !ctx.room.get(socket.id)?.host) return reply({ error: 'not_host' });
     endSession(ctx.roomId);
-    socket.to(`r:${ctx.roomId}`).emit('room:ended', {}); // everyone except the host: the host gets the ack below. Telling the host too made its page close the socket before the ack arrived, so it showed a false "couldn't end" error.
+    socket.to(`r:${ctx.roomId}`).emit('room:ended', { standing: isStandingSession(ctx.roomId) }); // everyone except the host: the host gets the ack below. Telling the host too made its page close the socket before the ack arrived, so it showed a false "couldn't end" error.
     for (const sid of ctx.room.keys()) {
       const s = io.sockets.sockets.get(sid);
       if (s) { s.data.room = null; s.leave(`r:${ctx.roomId}`); }
     }
     rooms.delete(ctx.roomId);
+    for (const m of ctx.room.values()) syncCallStatus(m.userId); // the call is over for everyone in it
     reply({ ok: true });
   });
 
@@ -218,6 +250,9 @@ function onConnect(socket) {
 }
 
 export function attachRealtime(server) {
+  // Calls live in memory, so after a restart nobody is in one: drop any automatic "In a meeting" / "Away" left over from before.
+  db.prepare('UPDATE users SET status_kind = NULL, status_emoji = NULL, status_text = NULL, status_until = NULL, status_auto = 0 WHERE status_auto = 1').run();
+  setInterval(resyncCalls, 30_000).unref();
   io = new Server(server, {
     maxHttpBufferSize: 1e5,
     // Notice a vanished browser (closed laptop, dead wifi) in about 15 seconds instead of the 45 default, so "online" stays honest.

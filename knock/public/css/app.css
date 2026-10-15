@@ -127,6 +127,8 @@ form .btn { margin-top: 1rem; }
 details { margin-top: 1rem; }
 summary { cursor: pointer; font-weight: 600; }
 .sched-form { display: grid; gap: 0.5rem; margin-top: 0.5rem; max-width: 24rem; }
+.sched-form .field-label { font-weight: 600; font-size: 0.9rem; margin-top: 0.25rem; }
+.cal-export { margin: 0.75rem 0 0; }
 .profile-card { max-width: 32rem; }
 .avatar { width: 5rem; height: 5rem; font-size: 2.6rem; margin-bottom: 1rem; }
 .profile-head { display: flex; align-items: center; gap: 1rem; margin: 1rem 0 2rem; }
@@ -152,6 +154,10 @@ summary { cursor: pointer; font-weight: 600; }
 .grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); grid-auto-rows: minmax(12rem, 1fr); gap: 0.75rem; padding: 0.75rem; overflow: auto; }
 .vtile { position: relative; margin: 0; background: #0f0d26; border: 2px solid var(--ink); border-radius: 16px; overflow: hidden; }
 .vtile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vtile.presenting { grid-column: 1 / -1; grid-row: span 2; }
+.vtile.presenting video { object-fit: contain; background: #000; }
+.vtile.blank video { visibility: hidden; }
+.vtile figcaption .pres { font-weight: 500; }
 .vtile figcaption { position: absolute; left: 0.6rem; bottom: 0.6rem; padding: 0.15rem 0.6rem; background: var(--paper); border: 2px solid var(--ink); border-radius: 999px; font-weight: 600; font-size: 0.85rem; }
 .side { width: 20rem; display: flex; flex-direction: column; border-left: 2px solid var(--ink); background: var(--card); }
 .side-tabs { padding: 0.5rem 0.5rem 0; margin: 0; }
@@ -169,6 +175,9 @@ summary { cursor: pointer; font-weight: 600; }
 .recap-kind input { width: auto; }
 select { font: inherit; color: var(--ink); background: var(--card); padding: 0.5rem 0.6rem; border: 2px solid var(--ink); border-radius: 12px; width: 100%; }
 .tile-avatar { position: absolute; top: 0.6rem; left: 0.6rem; z-index: 2; padding: 0; display: grid; background: none; border: 0; border-radius: 50%; cursor: pointer; box-shadow: 0 2px 0 var(--ink); }
+.tile-badges { position: absolute; top: 0.6rem; left: 3.6rem; z-index: 2; display: flex; gap: 0.3rem; }
+.tile-badges:empty { display: none; }
+.tile-badges .badge { display: grid; place-items: center; width: 1.7rem; height: 1.7rem; margin-top: 0.3rem; background: var(--paper); color: var(--danger); border: 2px solid var(--ink); border-radius: 50%; }
 .tile-avatar:hover .pic { background: var(--card); }
 .overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 1rem; background: rgba(27, 24, 64, 0.55); }
 .profile-pop { width: min(22rem, 100%); background: var(--card); border: 2px solid var(--ink); border-radius: 18px; box-shadow: 6px 6px 0 var(--ink); padding: 0.8rem 1.1rem 1.25rem; }
@@ -402,3 +411,16 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .msg-act:hover, .msg-act:focus-visible { color: var(--ink); }
 .msg-act.danger:hover, .msg-act.danger:focus-visible { color: var(--danger); }
 .add-people { margin-top: 0.8rem; }
+
+/* Custom status next to the online dot, and its editor in the profile popup */
+.status-chip { width: fit-content; display: inline-flex; align-items: center; gap: 0.3rem; max-width: 9.5rem; padding: 0.1rem 0.55rem; font: 600 0.78rem var(--body); color: var(--ink); background: var(--card); border: 1.5px solid var(--ink); border-radius: 999px; flex: 0 1 auto; min-width: 0; }
+.status-chip .status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-chip .status-emoji { flex: none; }
+.status-chip.status-dnd { border-color: var(--danger); color: var(--danger); }
+.profile-head .status-chip, .profile-pop .status-chip { max-width: 100%; margin-top: 0.25rem; }
+#dm-status { display: inline-flex; min-width: 0; margin-left: 0.4rem; }
+#dm-status .status-chip { max-width: 7.5rem; }
+.status-editor { margin-bottom: 1.1rem; }
+.status-editor .hint .status-chip { max-width: none; vertical-align: middle; }
+.status-for { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; font-size: 0.9rem; color: var(--mute); }
+.status-for select { width: auto; flex: 1; }

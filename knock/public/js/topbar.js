@@ -1,10 +1,11 @@
-import { api, h, icon, errText, toast, avatarEl, groupAvatarEl, openModal, confirmDialog, friendActions } from './common.js';
+import { api, h, icon, errText, toast, avatarEl, groupAvatarEl, openModal, confirmDialog, friendActions, statusChip, activeStatus } from './common.js';
 import { REACTION_EMOJI, IMAGE_BODY } from './reactions.js';
 import { prepareChatImage, uploadChatImage, imageErrorText, imagePicker, openImageViewer, PICK_TYPES } from './chat-media.js';
 import { cropAvatar } from './cropper.js';
 import { safetyActions, openReport } from './safety.js';
 import { profileButton } from './account.js';
 import * as notify from './notify.js';
+import { startAutoStatus, setMyStatus } from './autostatus.js';
 
 const S = { meId: null, groups: [], friends: [], notif: { inbox: [], spam: [], requests: [], accepted: [], groups: [], badge: 0, spamUnread: 0 }, tab: 'inbox', chat: null, groupInfo: null, chats: [], inCall: false, sessionId: null, share: true, typing: new Map(), typingTarget: null, typingSentAt: 0, pickFor: null, menuFor: null, editing: null, editDraft: '', highlight: null };
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
@@ -78,7 +79,7 @@ export function mountRoomTools(nav, user, sessionId) {
   document.body.classList.add('in-call');
   const { search, friendsBtn, chatsBtn, bellBtn } = buildTools();
   const copy = nav.querySelector('#copy');
-  nav.replaceChildren(search, friendsBtn, chatsBtn, bellBtn, copy, profileButton(user), panels.friends, panels.chats, panels.notif);
+  nav.replaceChildren(copy, search, friendsBtn, chatsBtn, bellBtn, profileButton(user), panels.friends, panels.chats, panels.notif);
   wirePanels();
 }
 
@@ -95,13 +96,14 @@ function togglePanel(name) {
 
 /* ---------- friends panel: Unfriend on the left, presence dot on the right, online first ---------- */
 const sortFriends = () => S.friends.sort((a, b) => b.online - a.online || a.display_name.localeCompare(b.display_name));
-async function refreshFriends() { S.friends = (await api('/api/friends')).friends; renderFriends(); }
+async function refreshFriends() { S.friends = (await api('/api/friends')).friends; renderFriends(); paintDmStatus(); }
 async function refreshGroups() { S.groups = (await api('/api/groups').catch(() => ({ groups: [] }))).groups; renderFriends(); }
 
 function friendRow(f) {
   return h('li', { class: 'row' },
     h('button', { class: 'link-btn danger', 'aria-label': `Unfriend ${f.display_name}`, onclick: () => unfriend(f) }, 'Unfriend'),
     h('button', { class: 'row-main', onclick: () => openChat(f) }, h('span', { class: 'name' }, f.display_name), h('span', { class: 'sub' }, '@' + f.handle)),
+    statusChip(f.status),
     h('span', { class: 'dot ' + (f.online ? 'on' : 'off'), role: 'img', 'aria-label': f.online ? 'Online' : 'Offline' }));
 }
 const groupUnread = (id) => S.notif.groups.find((x) => x.id === id)?.unread || 0;
@@ -124,6 +126,11 @@ function renderFriends() {
     ...section('Online', S.friends.filter((f) => f.online), friendRow),
     ...section('Offline', S.friends.filter((f) => !f.online), friendRow),
   ]);
+}
+// The friend's status line in the open direct chat's header.
+function paintDmStatus() {
+  const el = document.getElementById('dm-status');
+  if (el && S.chat?.user) el.replaceChildren(...[statusChip(S.friends.find((x) => x.id === S.chat.user.id)?.status)].filter(Boolean));
 }
 async function unfriend(f) {
   if (!confirm(`Remove ${f.display_name} from your friends?`)) return;
@@ -238,6 +245,7 @@ function renderChats() {
     ...(fresh.length ? [h('h3', {}, 'Start a new chat'), h('ul', { class: 'rows' }, fresh.map((f) => h('li', { class: 'row' },
       avatarEl(f, 34),
       h('button', { class: 'row-main', onclick: () => openChat(f) }, h('span', { class: 'name' }, f.display_name), h('span', { class: 'sub' }, '@' + f.handle)),
+      statusChip(f.status),
       h('span', { class: 'dot ' + (f.online ? 'on' : 'off'), role: 'img', 'aria-label': f.online ? 'Online' : 'Offline' }))))]
       : S.friends.length ? [] : [h('p', { class: 'hint' }, 'Add a friend to start a conversation.')]),
   ]);
@@ -582,7 +590,7 @@ async function openChat(u, { focus = true } = {}) {
     catch (err) { toast(errText(err)); input.value = body; }
   } }, ...picturePicker(input, (blob, caption) => uploadChatImage(`/api/messages/image?toId=${u.id}${caption ? '&caption=' + encodeURIComponent(caption) : ''}`, blob)), input, h('button', { class: 'btn primary', type: 'submit', 'aria-label': 'Send' }, icon('send', 18)));
   document.body.append(h('aside', { class: 'chat-dock', id: 'chat-dock', 'aria-label': `Chat with ${u.display_name}` },
-    h('header', {}, h('button', { class: 'name-btn', type: 'button', 'aria-haspopup': 'dialog', title: 'View profile', onclick: () => openProfileCard(u) }, u.display_name), h('span', { class: 'grow' }),
+    h('header', {}, h('button', { class: 'name-btn', type: 'button', 'aria-haspopup': 'dialog', title: 'View profile', onclick: () => openProfileCard(u) }, u.display_name), h('span', { id: 'dm-status' }, statusChip(S.friends.find((x) => x.id === u.id)?.status)), h('span', { class: 'grow' }),
       h('button', { class: 'link-btn', onclick: () => inviteToCall(u) }, 'Invite to call'),
       searchBtn(),
       h('button', { class: 'icon-btn sm', 'aria-label': 'Close chat', onclick: closeChat }, icon('x', 16))),
@@ -618,7 +626,7 @@ async function openProfileCard(u) {
       const groupBtn = h('button', { class: 'btn primary sm', type: 'button', onclick: () => { m.close(); openGroupCreate({ id: p.id, handle: p.handle, display_name: p.display_name, avatar_at: p.avatar_at }); } },
         h('span', { class: 'btn-ic' }, icon('users', 16)), `Create a group with ${p.display_name}`);
       body.replaceChildren(
-        h('div', { class: 'profile-head', style: 'margin-top:0' }, avatarEl(p, 88), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle))),
+        h('div', { class: 'profile-head', style: 'margin-top:0' }, avatarEl(p, 88), h('div', {}, h('h2', { style: 'font-size:1.6rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle), statusChip(p.status))),
         h('dl', { class: 'facts-list' },
           h('dt', {}, 'Username'), h('dd', {}, '@' + p.handle),
           h('dt', {}, 'Name at signup'), h('dd', {}, p.signup_name),
@@ -944,7 +952,13 @@ function applyGroupName(id, name) {
 function connect() {
   const socket = window.io();
   sock = socket;
-  api('/api/me').then((r) => { S.share = r.user.share_activity; }).catch(() => {});
+  api('/api/me').then((r) => { S.share = r.user.share_activity; notify.setStatus(r.user.status); setMyStatus(r.user.status); startAutoStatus(); }).catch(() => {});
+  // A status can end by itself ("clear after 1 hour"): redraw now and then so friends' lists don't show a stale one.
+  setInterval(() => {
+    let changed = false;
+    for (const f of S.friends) if (f.status && !activeStatus(f.status)) { f.status = null; changed = true; }
+    if (changed) { renderFriends(); paintDmStatus(); if (!panels.chats.hidden) renderChats(); }
+  }, 30_000);
   window.addEventListener('activity-updated', (e) => { // the switch in Settings
     S.share = e.detail;
     if (!S.share) { stopTyping(); clearTyping(); }
@@ -952,11 +966,18 @@ function connect() {
   });
   socket.on('connect', () => { refreshFriends(); refreshGroups(); refreshNotif(); });
   // Tapping a browser notification brings this tab forward and opens that chat.
-  notify.onOpen((o) => {
+  const openFromNotification = (o) => {
     window.focus();
-    if (o.kind === 'group') openGroupChat({ id: o.id, name: o.name });
-    else openChat({ id: o.id, handle: o.handle, display_name: o.name });
-  });
+    if (o?.kind === 'bell') { if (panels.notif.hidden) togglePanel('notif'); }
+    else if (o?.kind === 'group' && Number.isInteger(o.id)) openGroupChat({ id: o.id, name: String(o.name ?? '') });
+    else if (o?.kind === 'dm' && Number.isInteger(o.id)) openChat({ id: o.id, handle: o.handle, display_name: String(o.name ?? '') });
+  };
+  notify.onOpen(openFromNotification);
+  // A push notification tapped while Knock was closed opens /dashboard?open=<what to show>.
+  try {
+    const q = new URLSearchParams(location.search).get('open');
+    if (q) { history.replaceState(null, '', location.pathname); openFromNotification(JSON.parse(q)); }
+  } catch { /* ignore a malformed link */ }
   // Someone edited, deleted or pinned a message (or I did, in another tab).
   socket.on('message:changed', ({ kind, group_id: gid, message }) => applyChange(message, kind, gid));
   // The other person opened the chat: show "Seen" under everything of mine they hadn't read.
@@ -985,6 +1006,12 @@ function connect() {
   socket.on('presence', ({ id, online }) => {
     const f = S.friends.find((x) => x.id === id);
     if (f) { f.online = online; sortFriends(); renderFriends(); }
+  });
+  // A friend (or I, in another tab) changed their status.
+  socket.on('status', ({ id, status }) => {
+    if (id === S.meId) { notify.setStatus(status); setMyStatus(status); return; }
+    const f = S.friends.find((x) => x.id === id);
+    if (f) { f.status = status; renderFriends(); paintDmStatus(); if (!panels.chats.hidden) renderChats(); }
   });
   // A new message opens its chat box by itself, unless you're already in another chat (we never swap it out
   // from under you while you type) or it's from someone who isn't your friend (that goes to Spam).

@@ -180,7 +180,10 @@ auth.post('/google', authLimiter, async (req, res) => {
 
 auth.post('/logout', (req, res) => {
   if (req.user) dropSockets(req.user.id, (sid) => sid === req.cookies.sid);
-  if (req.cookies.sid) db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(sha256(req.cookies.sid));
+  if (req.cookies.sid) {
+    db.prepare('DELETE FROM push_subscriptions WHERE session_hash = ?').run(sha256(req.cookies.sid)); // no more pushes to a browser that logged out
+    db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(sha256(req.cookies.sid));
+  }
   res.clearCookie('sid', { path: '/' });
   res.json({ ok: true });
 });
@@ -229,6 +232,7 @@ auth.delete('/contact/:channel', requireUser, (req, res) => {
 
 // "Sign out of other devices": ends every login for this account except the one making the request.
 auth.post('/signout-others', requireUser, (req, res) => {
+  db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND session_hash != ?').run(req.user.id, sha256(req.cookies.sid));
   const info = db.prepare('DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?').run(req.user.id, sha256(req.cookies.sid));
   dropSockets(req.user.id, (sid) => sid !== req.cookies.sid);
   res.json({ ok: true, signedOut: Number(info.changes) });

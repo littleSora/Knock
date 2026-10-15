@@ -1,4 +1,4 @@
-import { api, h, icon, toast, errText, avatarEl, openModal } from './common.js';
+import { api, h, icon, toast, errText, avatarEl, openModal, statusChip, activeStatus } from './common.js';
 import { cropAvatar } from './cropper.js';
 
 const MAX_UPLOAD = 3 * 1024 * 1024; // 3 MB, checked on the file the person picks (before cropping)
@@ -21,6 +21,37 @@ async function uploadAvatar(blob) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data.error || 'request_failed'), { status: res.status, code: data.error });
   return data;
+}
+
+// Your status. Automatic by default: "In a meeting" while you're in a call, "Away" after 10 minutes away from the tab. Or pick one
+// yourself from the drop-down. Friends see it next to your online dot; "Do not disturb" also stops push notifications.
+const MODES = [['auto', 'Automatic'], ['meeting', '📅 In a meeting'], ['dnd', '⛔ Do not disturb'], ['away', '🌙 Away']];
+const DURATIONS = [['', 'Don’t clear'], ['30', '30 minutes'], ['60', '1 hour'], ['240', '4 hours'], ['today', 'Today']];
+let chosenFor = ''; // the "Clear after" you picked last, so the drop-down still shows it after the section redraws
+function statusSection(me, rerender) {
+  const msg = h('p', { class: 'error', role: 'alert' });
+  const active = activeStatus(me.status);
+  const picked = active && !active.auto && MODES.some(([k]) => k === active.kind) ? active.kind : 'auto'; // what *you* chose; Knock's own is "Automatic"
+  const mode = h('select', { id: 'statusMode', 'aria-label': 'Status' }, MODES.map(([v, t]) => h('option', { value: v, selected: v === picked }, t)));
+  const dur = h('select', { id: 'statusFor', 'aria-label': 'Clear status after', disabled: picked === 'auto' }, DURATIONS.map(([v, t]) => h('option', { value: v, selected: v === (picked !== 'auto' && active.until != null ? chosenFor : '') }, t)));
+  const minutes = () => (dur.value === '' ? null : dur.value === 'today' ? Math.max(1, Math.ceil((new Date().setHours(24, 0, 0, 0) - Date.now()) / 60000)) : Number(dur.value));
+  const save = async () => {
+    msg.textContent = '';
+    dur.disabled = mode.value === 'auto'; // "Clear after" only means something for a status you picked
+    chosenFor = mode.value === 'auto' ? '' : dur.value;
+    try { me.status = (await api('/api/me/status', { method: 'PUT', body: { kind: mode.value, minutes: mode.value === 'auto' ? null : minutes() } })).status; rerender(); }
+    catch (err) { msg.textContent = errText(err); }
+  };
+  mode.addEventListener('change', save);
+  dur.addEventListener('change', () => { if (mode.value !== 'auto') save(); }); // a new "clear after" applies to the status already picked
+  const current = statusChip(me.status);
+  return h('div', { class: 'status-editor' },
+    h('h3', {}, 'Status'),
+    h('p', { class: 'hint' }, current ? ['Friends see: ', current] : 'Friends can see your status next to your online dot. “Do not disturb” also pauses push notifications.'),
+    h('label', { class: 'status-for', for: 'statusMode' }, 'Show as', mode),
+    h('label', { class: 'status-for', for: 'statusFor' }, 'Clear after', dur),
+    h('p', { class: 'hint' }, 'Automatic shows “In a meeting” while you’re in a call and “Away” after 10 minutes away from this tab.'),
+    msg);
 }
 
 const fmtDate = (ms) => new Date(ms).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
@@ -82,6 +113,7 @@ async function openAccount(user) {
       file,
       h('p', { class: 'hint' }, 'PNG, JPG, WebP or GIF, up to 3 MB. You’ll crop it to fit the circle.'),
       msg,
+      statusSection(me, render),
       h('h3', {}, 'Account'),
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Username'), h('dd', {}, '@' + me.handle),

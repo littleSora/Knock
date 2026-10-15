@@ -12,6 +12,7 @@
       <section class="block" aria-labelledby="th">
         <h2 id="th">Your scheduled calls</h2>
         <div id="schedule"></div>
+        <p id="calExport" class="cal-export" hidden><a class="link-btn" href="/api/calendar.ics" download>Add all to my calendar (.ics)</a></p>
         <p id="schedEmpty" class="empty" hidden>Nothing scheduled yet. Use “Schedule a call” below.</p>
         <details id="pastWrap" hidden>
           <summary id="pastSummary"></summary>
@@ -22,6 +23,12 @@
           <form id="sched" class="sched-form">
             <input id="schedTitle" aria-label="Call title" placeholder="What’s the call about?" maxlength="80" required>
             <input id="schedWhen" type="datetime-local" aria-label="Date and time" required>
+            <label class="field-label" for="schedRepeat">Repeat</label>
+            <select id="schedRepeat"></select>
+            <div id="schedUntilWrap" hidden>
+              <label class="field-label" for="schedUntil">Last day (optional)</label>
+              <input id="schedUntil" type="date">
+            </div>
             <button class="btn">Add to schedule</button>
           </form>
         </details>

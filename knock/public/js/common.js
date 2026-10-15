@@ -23,6 +23,8 @@ const ICONS = {
   send: '<path d="M21 3 10 14"/><path d="m21 3-7 18-4-7-7-4Z"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   micOff: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M4 4l16 16"/>',
+  headphones: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/>',
+  headphonesOff: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/><path d="M4 4l16 16"/>',
   video: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3Z"/>',
   videoOff: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3ZM3 3l18 18"/>',
   leave: '<path d="M4 15c4-4 12-4 16 0l-2 3-3-1.5v-2.5a8 8 0 0 0-6 0v2.5L6 18Z"/>',
@@ -45,6 +47,8 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>',
   pin: '<path d="M9 4h6l-1 6 3 3H7l3-3Z"/><path d="M12 13v7"/>',
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
+  screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  screenOff: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M4 3l16 18"/>',
 };
 export function icon(name, size = 20) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -88,6 +92,7 @@ const MESSAGES = {
   already_in_call: 'You’re already in this call in another tab or on another device. Close that one first, or just use it.',
   room_full: 'This call is full.',
   session_ended: 'That session has ended.',
+  invalid_repeat: 'Check the repeat setting. The last day has to be after the first call.',
   already_in_use: 'That is already used by another account.',
   same_as_current: 'That is already on your account.',
   last_sign_in_method: 'You need at least one way to sign in, so this one can’t be removed.',
@@ -122,8 +127,20 @@ const MESSAGES = {
   admins_only: 'Only group admins can do that in this group.',
   creator_only: 'Only the person who created the group can do that.',
   invalid_user: 'That person isn’t available.',
+  invalid_status: 'Pick a status from the list.',
+  invalid_subscription: 'This browser couldn’t be set up for push notifications.',
+  not_subscribed: 'Push isn’t turned on in this browser.',
 };
 export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
+
+/* ---------- custom status ("📅 In a meeting"), shown to friends next to the online dot ---------- */
+// null once it has expired (the server also stops sending it, but a page that's been open for hours still has the old value).
+export const activeStatus = (s) => (s && (s.until == null || s.until > Date.now()) ? s : null);
+export function statusChip(s, cls = 'status-chip') {
+  const a = activeStatus(s);
+  if (!a) return null;
+  return h('span', { class: `${cls} status-${a.kind}`, title: a.text }, a.emoji ? h('span', { class: 'status-emoji', 'aria-hidden': 'true' }, a.emoji) : null, h('span', { class: 'status-text' }, a.text));
+}
 
 export const safeNext = (n) => (n && n.startsWith('/') && !n.startsWith('//') && !n.includes('\\') ? n : null);
 export const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -178,7 +195,11 @@ export function friendActions(p, relation, onChange) {
       box.replaceChildren(h('span', { class: 'friend-state' }, icon('ban', 18), 'You blocked this person'),
         h('button', { class: 'btn sm', type: 'button', onclick: () => go(() => api(`/api/blocks/${id}`, { method: 'DELETE' }), 'none', `Unblocked ${p.display_name}.`) }, 'Unblock'));
     } else if (relation === 'friend') {
-      box.replaceChildren(h('span', { class: 'friend-state' }, icon('userCheck', 18), 'Friends'));
+      box.replaceChildren(h('span', { class: 'friend-state' }, icon('userCheck', 18), 'Friends'),
+        h('button', { class: 'btn sm danger', type: 'button', 'aria-label': `Unfriend ${p.display_name}`, onclick: () => {
+          if (!confirm(`Remove ${p.display_name} from your friends?`)) return;
+          go(() => api(`/api/friends/${id}`, { method: 'DELETE' }), 'none', `You unfriended ${p.display_name}.`);
+        } }, 'Unfriend'));
     } else if (relation === 'outgoing') {
       box.replaceChildren(h('span', { class: 'friend-state' }, 'Request sent'),
         h('button', { class: 'btn sm', type: 'button', onclick: () => go(() => api(`/api/friends/requests/${id}`, { method: 'DELETE' }), 'none', 'Friend request cancelled.') }, 'Cancel'));

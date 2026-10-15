@@ -1,14 +1,17 @@
 import express, { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import crypto from 'node:crypto';
-import { db, createSession, sessionExists, sessionInfo, hasBlocked, blockedEither, activityOn, shareActivity } from './db.js';
+import { db, createSession, sessionExists, sessionInfo, hasBlocked, blockedEither, activityOn, shareActivity, statusOf, saveStatus, clearStatus, STATUS_PRESETS } from './db.js';
 import { requireUser as needUser } from './auth.js';
-import { normalizeSessionId, isSessionId, cleanName, cleanBody } from './util.js';
-import { isOnline, emitTo, roomCount } from './realtime.js';
+import { normalizeSessionId, isSessionId, cleanName, cleanBody, sha256 } from './util.js';
+import { isOnline, emitTo, roomCount, announceStatus, syncCallStatus, isInCall } from './realtime.js';
+import { pushTo, vapidPublicKey, saveSubscription, removeSubscription, hasSubscription } from './push.js';
 import { isProd } from './env.js';
 import { parseTheme } from '../public/js/theme-core.js';
 import { validateReport } from '../public/js/report-categories.js';
 import { IMAGE_BODY } from '../public/js/reactions.js';
+import { isRepeat } from '../public/js/recurrence.js';
+import { buildCalendar, fileSlug } from './ics.js';
 import { isReactionEmoji, sniffImage, saveChatImage, canSeeImage, loadReactions, toggleReaction } from './chat-extras.js';
 
 export const api = Router();
@@ -100,7 +103,7 @@ api.get('/me', needUser, (req, res) => {
   let theme = null;
   try { theme = u.theme ? JSON.parse(u.theme) : null; } catch { /* ignore a bad stored value */ }
   delete u.theme;
-  res.json({ user: { ...u, has_google: !!u.has_google, share_activity: !!u.share_activity }, theme });
+  res.json({ user: { ...u, has_google: !!u.has_google, share_activity: !!u.share_activity, status: statusOf(req.user.id) }, theme });
 });
 
 // The look of the app is saved on the account so it follows the person to every device.
@@ -197,6 +200,71 @@ api.put('/me/details', needUser, (req, res) => {
   res.json({ ok: true, display_name, first_name, last_name, middle_initial, birthday, workplace, country });
 });
 
+/* ---------- custom status ---------- */
+// A short line next to your online dot, for friends only. It is automatic by default: "In a meeting" while you're in a call
+// (the server does that, see syncCallStatus) and "Away" once the page says you've been away from the tab for 10 minutes.
+// You can also pick one yourself (the Status drop-down), and that is never overwritten. It can clear itself after a while.
+// "Do not disturb" also stops browser push notifications for you.
+const MAX_STATUS_MINUTES = 7 * 24 * 60;
+// Pick one yourself: { kind: 'meeting' | 'dnd' | 'away', minutes? }. { kind: 'auto' } goes back to Automatic.
+api.put('/me/status', needUser, limiter(30), (req, res) => {
+  const b = req.body ?? {};
+  const kind = String(b.kind ?? '');
+  if (kind === 'auto') {
+    clearStatus(req.user.id);
+    syncCallStatus(req.user.id); // in a call right now? then Automatic means "In a meeting" straight away
+    return res.json({ ok: true, status: announceStatus(req.user.id) });
+  }
+  if (!STATUS_PRESETS[kind]) return res.status(400).json({ error: 'invalid_status' });
+  let until = null;
+  if (b.minutes != null) {
+    const m = Number(b.minutes);
+    if (!Number.isFinite(m) || m < 1 || m > MAX_STATUS_MINUTES) return res.status(400).json({ error: 'invalid_status' });
+    until = Date.now() + Math.round(m) * 60_000;
+  }
+  saveStatus(req.user.id, kind, { until });
+  res.json({ ok: true, status: announceStatus(req.user.id) });
+});
+// The page sets "Away" after 10 minutes away from every Knock tab, and takes it back when you return. Only ever touches an
+// automatic status: it can't replace one you picked, and it waits while you're in a call (that is "In a meeting").
+api.put('/me/status/away', needUser, limiter(30), (req, res) => {
+  const s = statusOf(req.user.id);
+  if (!s && !isInCall(req.user.id)) saveStatus(req.user.id, 'away', { auto: true });
+  res.json({ ok: true, status: announceStatus(req.user.id) });
+});
+api.delete('/me/status/away', needUser, limiter(30), (req, res) => {
+  const s = statusOf(req.user.id);
+  if (s?.auto && s.kind === 'away') clearStatus(req.user.id);
+  res.json({ ok: true, status: announceStatus(req.user.id) });
+});
+
+/* ---------- browser push notifications ---------- */
+// The browser gives each device a private address (an "endpoint") that only our signed pushes can use. It is tied to the login
+// that turned it on, so logging out (or "sign out of other devices") turns push off there too.
+api.get('/push/key', needUser, (_req, res) => res.json({ key: vapidPublicKey }));
+api.put('/push/subscription', needUser, limiter(30), (req, res) => {
+  const sub = req.body?.subscription;
+  const endpoint = sub?.endpoint;
+  const keys = sub?.keys;
+  if (typeof endpoint !== 'string' || endpoint.length > 2048 || !/^https:\/\//.test(endpoint) || typeof keys?.p256dh !== 'string' || typeof keys?.auth !== 'string' || keys.p256dh.length > 200 || keys.auth.length > 100) {
+    return res.status(400).json({ error: 'invalid_subscription' });
+  }
+  saveSubscription(req.user.id, sha256(req.cookies.sid), { endpoint, keys }, req.body?.preview === true); // unspecified (the browser renewed it by itself) = no message text until the page says otherwise
+  res.json({ ok: true });
+});
+api.delete('/push/subscription', needUser, (req, res) => {
+  const endpoint = String(req.body?.endpoint ?? '');
+  res.json({ ok: true, removed: !!endpoint && removeSubscription(req.user.id, endpoint) > 0 });
+});
+// "Send a test": goes through the real push service, and is shown even if this tab is in front.
+api.post('/push/test', needUser, limiter(6), (req, res) => {
+  const endpoint = String(req.body?.endpoint ?? '');
+  if (!hasSubscription(req.user.id, endpoint)) return res.status(404).json({ error: 'not_subscribed' });
+  pushTo(req.user.id, { title: 'Knock', body: 'Push notifications are working.', tag: 'knock-test', force: true }, { force: true });
+  res.json({ ok: true });
+});
+const pushPreview = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+
 /* ---------- dashboard ---------- */
 api.get('/dashboard', needUser, (req, res) => {
   const t0 = Number(req.query.dayStart); // the browser sends its local midnight so "yesterday" matches the user's timezone
@@ -208,7 +276,7 @@ api.get('/dashboard', needUser, (req, res) => {
   });
   // The user's whole schedule, soonest first. The browser splits it into upcoming and earlier.
   const schedule = db
-    .prepare('SELECT id, title, scheduled_at, session_id FROM appointments WHERE owner_id = ? ORDER BY scheduled_at LIMIT 500')
+    .prepare('SELECT id, title, scheduled_at, session_id, recurrence, repeat_until FROM appointments WHERE owner_id = ? ORDER BY scheduled_at LIMIT 500')
     .all(req.user.id);
   res.json({ yesterday: week[6], week, schedule });
 });
@@ -249,9 +317,45 @@ api.post('/appointments', needUser, (req, res) => {
   if (!title || !Number.isFinite(at) || at < Date.now() - 3_600_000 || at > Date.now() + 366 * DAY) {
     return res.status(400).json({ error: 'invalid_appointment' });
   }
+  const recurrence = req.body?.recurrence ?? 'none';
+  let until = null;
+  if (recurrence !== 'none' && req.body?.repeatUntil != null) until = Number(req.body.repeatUntil);
+  const tz = Number(req.body?.tzOffset ?? 0);
+  if (!isRepeat(recurrence) || (until !== null && (!Number.isFinite(until) || until < at || until > at + 5 * 366 * DAY)) || !Number.isInteger(tz) || Math.abs(tz) > 840) {
+    return res.status(400).json({ error: 'invalid_repeat' });
+  }
   const sessionId = createSession(req.user.id);
-  const info = db.prepare('INSERT INTO appointments(owner_id, title, scheduled_at, session_id) VALUES (?,?,?,?)').run(req.user.id, title, at, sessionId);
+  const info = db
+    .prepare('INSERT INTO appointments(owner_id, title, scheduled_at, session_id, recurrence, repeat_until, tz_offset) VALUES (?,?,?,?,?,?,?)')
+    .run(req.user.id, title, at, sessionId, recurrence, until, tz);
   res.json({ id: Number(info.lastInsertRowid), session_id: sessionId });
+});
+
+/* ---------- calendar export (.ics): one call, or everything still to come ---------- */
+const sendCalendar = (req, res, rows, name) => {
+  res.set({
+    'Content-Type': 'text/calendar; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${name}.ics"`,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.send(buildCalendar(rows, `${req.protocol}://${req.get('host')}`));
+};
+const APPT_COLS = 'id, title, scheduled_at, session_id, recurrence, repeat_until, tz_offset';
+api.get('/calendar.ics', needUser, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT ${APPT_COLS} FROM appointments WHERE owner_id = ?
+         AND (scheduled_at >= ? OR (recurrence <> 'none' AND (repeat_until IS NULL OR repeat_until >= ?)))
+       ORDER BY scheduled_at LIMIT 500`,
+    )
+    .all(req.user.id, Date.now() - 3_600_000, Date.now());
+  sendCalendar(req, res, rows, 'knock-calls');
+});
+api.get('/appointments/:id/ics', needUser, (req, res) => {
+  const row = db.prepare(`SELECT ${APPT_COLS} FROM appointments WHERE id = ? AND owner_id = ?`).get(Number(req.params.id), req.user.id);
+  if (!row) return res.status(404).json({ error: 'not_found' });
+  sendCalendar(req, res, [row], 'knock-' + fileSlug(row.title));
 });
 api.delete('/appointments/:id', needUser, (req, res) => {
   db.prepare('DELETE FROM appointments WHERE id = ? AND owner_id = ?').run(Number(req.params.id), req.user.id);
@@ -279,6 +383,7 @@ api.get('/users/:handle', needUser, (req, res) => {
     .get(String(req.params.handle).toLowerCase());
   if (!user || hasBlocked(user.id, req.user.id)) return res.status(404).json({ error: 'user_not_found' }); // blocked by them: looks the same as "no such person"
   const relation = relationTo(req.user.id, user.id);
+  if (relation === 'self' || relation === 'friend') user.status = statusOf(user.id); // only friends see it
   res.json({ user, isSelf: relation === 'self', isFriend: relation === 'friend', relation });
 });
 
@@ -315,6 +420,8 @@ function announceFriendship(accepterId, requesterId) {
   db.prepare("DELETE FROM notifications WHERE type = 'friend_accepted' AND user_id = ? AND from_id = ?").run(requesterId, accepterId);
   db.prepare("INSERT INTO notifications(user_id, type, from_id, created_at) VALUES (?, 'friend_accepted', ?, ?)").run(requesterId, accepterId, Date.now());
   emitTo(requesterId, 'notif:new', { type: 'friend_accepted' });
+  const accepter = db.prepare('SELECT display_name FROM users WHERE id = ?').get(accepterId);
+  if (accepter) pushTo(requesterId, { title: 'Friend request accepted', body: `${accepter.display_name} accepted your friend request`, tag: `friend-accepted-${accepterId}`, open: { kind: 'bell' } });
   emitTo(requesterId, 'friends:changed', {});
   emitTo(accepterId, 'friends:changed', {});
 }
@@ -327,7 +434,7 @@ api.get('/friends', needUser, (req, res) => {
   const rows = db
     .prepare('SELECT u.id, u.handle, u.display_name, (SELECT updated_at FROM avatars WHERE user_id = u.id) AS avatar_at FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = ?')
     .all(req.user.id)
-    .map((f) => ({ ...f, online: isOnline(f.id) }));
+    .map((f) => ({ ...f, online: isOnline(f.id), status: statusOf(f.id) }));
   rows.sort((a, b) => b.online - a.online || a.display_name.localeCompare(b.display_name)); // online first
   res.json({ friends: rows });
 });
@@ -355,7 +462,10 @@ api.post('/friends/:id', needUser, socialLimiter, (req, res) => {
     db.prepare('UPDATE friend_requests SET created_at = ?, seen_at = NULL, declined_at = NULL WHERE from_id = ? AND to_id = ?').run(now, me, id);
     notify = true;
   } // else: still pending, or declined recently. Quietly nothing, so the other person isn't pestered.
-  if (notify) emitTo(id, 'notif:new', { type: 'friend_request' });
+  if (notify) {
+    emitTo(id, 'notif:new', { type: 'friend_request' });
+    pushTo(id, { title: 'New friend request', body: `${req.user.display_name} wants to be your friend`, tag: `friend-request-${me}`, open: { kind: 'bell' } });
+  }
   res.json({ ok: true, state: 'outgoing' });
 });
 
@@ -521,6 +631,7 @@ function deliverDm(req, res, to, body, imageId = null) {
   const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, to_id: to, body, created_at: now, image_id: imageId, edited_at: null, deleted: false, pinned: false, reactions: [] };
   const spam = !db.prepare('SELECT 1 FROM friends WHERE user_id = ? AND friend_id = ?').get(to, req.user.id);
   emitTo(to, 'dm:new', { ...message, from: req.user, spam });
+  if (!spam) pushTo(to, { title: req.user.display_name, body: pushPreview(body), tag: `dm-${req.user.id}`, open: { kind: 'dm', id: req.user.id, name: req.user.display_name, handle: req.user.handle } }); // Spam never alerts
   emitTo(req.user.id, 'dm:echo', message); // keeps the sender's other tabs in sync
   res.json({ message });
 }
@@ -1141,7 +1252,10 @@ function deliverGroupMessage(g, req, res, body, imageId = null) {
   const now = Date.now();
   const info = db.prepare('INSERT INTO group_messages(group_id, from_id, body, created_at, image_id) VALUES (?,?,?,?,?)').run(g.id, req.user.id, body, now, imageId);
   const message = { id: Number(info.lastInsertRowid), from_id: req.user.id, from_name: req.user.display_name, body, created_at: now, kind: 'msg', image_id: imageId, edited_at: null, deleted: false, pinned: false, reactions: [] };
-  for (const id of memberIds(g.id)) emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
+  for (const id of memberIds(g.id)) {
+    emitTo(id, 'group:msg', { group_id: g.id, group_name: g.name, message }); // includes the sender's other tabs
+    if (id !== req.user.id && !blockedEither(id, req.user.id)) pushTo(id, { title: g.name, body: `${req.user.display_name}: ${pushPreview(body)}`, tag: `group-${g.id}`, open: { kind: 'group', id: g.id, name: g.name } });
+  }
   res.json({ message });
 }
 api.post('/groups/:id/messages', needUser, socialLimiter, (req, res) => {

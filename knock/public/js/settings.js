@@ -301,7 +301,10 @@ function chatPrivacy() {
 function notifications() {
   const status = h('p', { class: 'hint', role: 'status' });
   const toggle = h('button', { type: 'button', class: 'btn sm' });
-  const test = h('button', { type: 'button', class: 'btn sm', onclick: () => notify.test() }, 'Send a test');
+  const test = h('button', { type: 'button', class: 'btn sm', onclick: async () => {
+    if (!notify.pushOn()) return notify.test();
+    try { await notify.testPush(); } catch { toast('Couldn’t send the test. Try turning notifications off and on again.'); }
+  } }, 'Send a test');
   const preview = h('input', { type: 'checkbox', id: 'notifPreview', checked: notify.previewOn() });
   preview.addEventListener('change', () => notify.setPreview(preview.checked));
   const previewRow = h('label', { class: 'check-row', for: 'notifPreview' }, preview, h('span', {}, 'Show the message text in the notification'));
@@ -314,19 +317,23 @@ function notifications() {
     status.classList.remove('error');
     if (perm === 'unsupported') { status.textContent = 'This browser doesn’t support notifications.'; status.classList.add('error'); }
     else if (perm === 'denied') { status.textContent = 'Notifications are blocked for this site. Allow them in your browser’s site settings, then come back here.'; status.classList.add('error'); }
-    else status.textContent = on ? 'On in this browser. You’ll get a notification for new messages while you’re on another tab or window.' : 'Off in this browser.';
+    else if (!on) status.textContent = 'Off in this browser.';
+    else if (notify.pushOn()) status.textContent = 'On in this browser. You’ll get a notification for new messages and friend requests whenever you’re not on Knock, even if the tab or the browser is closed.';
+    else status.textContent = 'On in this browser, but only while Knock is open in a tab or window. Push isn’t available here (it needs https, or localhost).';
   }
   toggle.addEventListener('click', async () => {
+    toggle.disabled = true;
     if (notify.enabled()) notify.disable();
     else {
       const result = await notify.enable();
       if (result === 'default') toast('Notifications weren’t turned on. Choose “Allow” when your browser asks.');
     }
+    toggle.disabled = false;
     paint();
   });
   paint();
   return section('ntH', 'Notifications',
-    h('p', { class: 'hint' }, 'Get a browser notification when a friend or group messages you while you’re not on this tab. Messages from people who aren’t your friends (Spam) never notify. It works while Knock is open in a tab or window, not while the browser is closed.'),
+    h('p', { class: 'hint' }, 'Get a browser notification when a friend or group messages you, or when you get a friend request, while you’re not looking at Knock. Messages from people who aren’t your friends (Spam) never notify. Setting your status to “Do not disturb” pauses all of them. This is a per-browser choice, so turn it on in each browser you use.'),
     status, previewRow, h('div', { class: 'set-actions' }, toggle, test));
 }
 

@@ -1,4 +1,4 @@
-import { api, h, errText, toast, avatarEl, friendActions } from './common.js';
+import { api, h, errText, toast, avatarEl, friendActions, statusChip } from './common.js';
 import { mountTopbar } from './topbar.js';
 import { safetyActions } from './safety.js';
 
@@ -31,7 +31,7 @@ if (!user) {
 
     const paint = (relation) => view.replaceChildren(
       h('div', { class: 'profile-head' }, avatarEl(p, 80),
-        h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle)), h('span', { class: 'grow' }), isSelf ? null : friendActions(p, relation, paint)),
+        h('div', {}, h('h1', { style: 'font-size:2.4rem' }, p.display_name), h('p', { class: 'sub' }, '@' + p.handle), statusChip(p.status)), h('span', { class: 'grow' }), isSelf ? null : friendActions(p, relation, paint)),
       ...(details ? [details] : []),
       ...(isSelf ? [h('p', { class: 'lede' }, 'This is how other people see you.')]
         : [relation === 'blocked' ? h('p', { class: 'lede' }, `You blocked ${p.display_name}, so you can’t message each other. Unblock them to talk again.`) : form,

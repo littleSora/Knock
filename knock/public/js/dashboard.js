@@ -1,5 +1,6 @@
-import { api, h, errText, fmtTime, toast } from './common.js';
+import { api, h, errText, fmtTime, toast, confirmDialog } from './common.js';
 import { mountTopbar } from './topbar.js';
+import { REPEATS, repeatLabel, nextOccurrence } from './recurrence.js';
 
 const $ = (id) => document.getElementById(id);
 const DAY = 86_400_000;
@@ -34,12 +35,25 @@ async function load() {
 await load();
 loadRecaps();
 
+$('schedRepeat').replaceChildren(...REPEATS.map((r) => h('option', { value: r.id }, r.label)));
+$('schedRepeat').addEventListener('change', () => { $('schedUntilWrap').hidden = $('schedRepeat').value === 'none'; });
 $('sched').addEventListener('submit', async (e) => {
   e.preventDefault();
+  const recurrence = $('schedRepeat').value;
+  const start = new Date($('schedWhen').value);
+  if (recurrence === 'weekdays') { // a Mon–Fri series can't start on a weekend: begin on the Monday after
+    while (start.getDay() === 0 || start.getDay() === 6) start.setDate(start.getDate() + 1);
+  }
+  let repeatUntil = null;
+  if (recurrence !== 'none' && $('schedUntil').value) {
+    const [y, m, d] = $('schedUntil').value.split('-').map(Number);
+    repeatUntil = new Date(y, m - 1, d, 23, 59, 59, 999).getTime(); // the whole last day counts
+  }
   try {
-    await api('/api/appointments', { method: 'POST', body: { title: $('schedTitle').value, scheduledAt: new Date($('schedWhen').value).getTime() } });
+    await api('/api/appointments', { method: 'POST', body: { title: $('schedTitle').value, scheduledAt: start.getTime(), recurrence, repeatUntil, tzOffset: start.getTimezoneOffset() } });
     $('sched').reset();
-    toast('Call scheduled. Share its link from the list.');
+    $('schedUntilWrap').hidden = true;
+    toast(recurrence === 'none' ? 'Call scheduled. Share its link from the list.' : 'Repeating call scheduled. The same link works every time.');
     load();
   } catch (err) { toast(err.code === 'invalid_appointment' ? 'Pick a title and a time that hasn’t passed.' : errText(err)); }
 });
@@ -59,29 +73,46 @@ function dayLabel(ms) {
   const date = new Date(ms).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
   return diff === 0 ? `Today · ${date}` : diff === 1 ? `Tomorrow · ${date}` : date;
 }
-function scheduleRow(a, past) {
+function scheduleRow(a, at, past) {
+  const repeats = a.recurrence && a.recurrence !== 'none';
+  const sub = [`Code ${a.session_id}`, repeats ? repeatLabel(a.recurrence) + (a.repeat_until ? ` until ${new Date(a.repeat_until).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : '') : ''].filter(Boolean).join(' · ');
+  const cancel = async () => {
+    if (repeats && !past && !(await confirmDialog({ title: 'Cancel this repeating call?', body: `“${a.title}” and all of its future calls will be removed. The link will stop being listed here.`, confirmText: 'Cancel series', cancelText: 'Keep it' }))) return;
+    await api('/api/appointments/' + a.id, { method: 'DELETE' });
+    load();
+  };
   return h('li', { class: 'row' },
-    h('span', { class: 'time' }, past ? new Date(a.scheduled_at).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + fmtTime(a.scheduled_at) : fmtTime(a.scheduled_at)),
-    h('span', { class: 'row-main' }, h('span', { class: 'name' }, a.title), h('span', { class: 'sub' }, `Code ${a.session_id}`)),
-    h('a', { class: 'btn sm', href: '/s/' + a.session_id }, 'Join'),
+    h('span', { class: 'time' }, past ? new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }) + (repeats ? '' : ' ' + fmtTime(at)) : fmtTime(at)),
+    h('span', { class: 'row-main' }, h('span', { class: 'name' }, a.title), h('span', { class: 'sub' }, sub)),
+    past ? null : h('a', { class: 'btn sm', href: '/s/' + a.session_id }, 'Join'),
     h('button', { class: 'link-btn', onclick: async () => { await navigator.clipboard.writeText(`${location.origin}/s/${a.session_id}`).catch(() => {}); toast('Invite link copied'); } }, 'Copy link'),
-    h('button', { class: 'link-btn danger', 'aria-label': `Cancel ${a.title}`, onclick: async () => { await api('/api/appointments/' + a.id, { method: 'DELETE' }); load(); } }, past ? 'Remove' : 'Cancel'));
+    past ? null : h('a', { class: 'link-btn', href: `/api/appointments/${a.id}/ics`, download: '', 'aria-label': `Add ${a.title} to your calendar` }, 'Calendar'),
+    h('button', { class: 'link-btn danger', 'aria-label': `${repeats && !past ? 'Cancel series' : 'Cancel'} ${a.title}`, onclick: cancel }, past ? 'Remove' : repeats ? 'Cancel series' : 'Cancel'));
 }
 function renderSchedule(all) {
   const cutoff = Date.now() - 3_600_000; // a call stays "upcoming" for an hour after its start time
-  const upcoming = all.filter((a) => a.scheduled_at >= cutoff);
-  const earlier = all.filter((a) => a.scheduled_at < cutoff).reverse();
-  $('schedEmpty').hidden = upcoming.length > 0;
-  const groups = [];
-  for (const a of upcoming) {
-    const label = dayLabel(a.scheduled_at);
-    if (groups.at(-1)?.label !== label) groups.push({ label, rows: [] });
-    groups.at(-1).rows.push(a);
+  // A repeating call shows once, at its next time. A series whose last day has passed moves to "Earlier calls".
+  const upcoming = [];
+  const earlier = [];
+  for (const a of all) {
+    const next = nextOccurrence(a, cutoff);
+    if (next != null) upcoming.push({ a, at: next });
+    else earlier.push({ a, at: a.repeat_until ?? a.scheduled_at });
   }
-  $('schedule').replaceChildren(...groups.flatMap((g) => [h('h3', { class: 'day-head' }, g.label), h('ul', { class: 'rows' }, g.rows.map((a) => scheduleRow(a, false)))]));
+  upcoming.sort((x, y) => x.at - y.at);
+  earlier.sort((x, y) => y.at - x.at);
+  $('schedEmpty').hidden = upcoming.length > 0;
+  $('calExport').hidden = upcoming.length === 0;
+  const groups = [];
+  for (const u of upcoming) {
+    const label = dayLabel(u.at);
+    if (groups.at(-1)?.label !== label) groups.push({ label, rows: [] });
+    groups.at(-1).rows.push(u);
+  }
+  $('schedule').replaceChildren(...groups.flatMap((g) => [h('h3', { class: 'day-head' }, g.label), h('ul', { class: 'rows' }, g.rows.map((u) => scheduleRow(u.a, u.at, false)))]));
   $('pastWrap').hidden = !earlier.length;
   $('pastSummary').textContent = `Earlier calls (${earlier.length})`;
-  $('past').replaceChildren(...earlier.map((a) => scheduleRow(a, true)));
+  $('past').replaceChildren(...earlier.map((u) => scheduleRow(u.a, u.at, true)));
 }
 
 /* ---------- smart recaps ---------- */

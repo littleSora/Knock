@@ -261,11 +261,62 @@ const ensureColumn = (table, col, ddl) => {
 };
 for (const table of ['messages', 'group_messages']) for (const col of ['edited_at', 'deleted_at', 'pinned_at', 'pinned_by']) ensureColumn(table, col, 'INTEGER');
 
+// Repeating calls: how often (none, daily, weekdays, weekly, biweekly, monthly), an optional last day, and the browser's UTC
+// offset when the call was made (only used to write "every weekday" correctly in the .ics file).
+ensureColumn('appointments', 'recurrence', "TEXT NOT NULL DEFAULT 'none'");
+ensureColumn('appointments', 'repeat_until', 'INTEGER');
+ensureColumn('appointments', 'tz_offset', 'INTEGER NOT NULL DEFAULT 0');
+
 // Group roles. The creator (group_chats.created_by) is always an admin and can make other members admins. The creator can also
 // limit who may rename the group and who may add people; by default nothing is limited, exactly as before.
 ensureColumn('group_members', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('group_chats', 'only_admins_rename', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('group_chats', 'only_admins_add', 'INTEGER NOT NULL DEFAULT 0');
+
+// Custom status ("In a meeting", "Do not disturb", or your own words), shown to friends next to the online dot.
+// status_kind: NULL (none) | 'meeting' | 'dnd' | 'away' | 'custom'. status_until (ms) is when it clears by itself; NULL = until you clear it.
+ensureColumn('users', 'status_kind', 'TEXT');
+ensureColumn('users', 'status_emoji', 'TEXT');
+ensureColumn('users', 'status_text', 'TEXT');
+ensureColumn('users', 'status_until', 'INTEGER');
+// status_auto: 1 when Knock set the status by itself ("In a meeting" while you're in a call, "Away" after 10 minutes away from
+// the tab). Anything you pick yourself is 0, and Knock never overwrites that.
+ensureColumn('users', 'status_auto', 'INTEGER NOT NULL DEFAULT 0');
+
+// Browser push subscriptions (one row per browser). `preview` = may the notification show the message text.
+// Also a tiny key/value table, used to keep the push (VAPID) keys so they survive restarts without any setup.
+db.exec(`
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  preview INTEGER NOT NULL DEFAULT 1,
+  session_hash TEXT NOT NULL, -- the login (auth_sessions.token_hash) that turned it on: logging out of it turns the push off
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS push_by_user ON push_subscriptions(user_id);
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`);
+
+// What a friend may see of someone's status: nothing once it has expired. Used by every place that shows one.
+const statusRow = db.prepare('SELECT status_kind, status_emoji, status_text, status_until, status_auto FROM users WHERE id = ?');
+export function statusOf(id, now = Date.now()) {
+  const s = statusRow.get(id);
+  if (!s || !s.status_kind || (s.status_until != null && s.status_until <= now)) return null;
+  return { kind: s.status_kind, emoji: s.status_emoji || '', text: s.status_text || '', until: s.status_until, auto: !!s.status_auto };
+}
+export const isDnd = (id) => statusOf(id)?.kind === 'dnd';
+// The only statuses there are: [emoji, text]. Picked from the Status drop-down, or set by Knock itself (meeting, away).
+export const STATUS_PRESETS = { meeting: ['📅', 'In a meeting'], dnd: ['⛔', 'Do not disturb'], away: ['🌙', 'Away'] };
+const writeStatus = db.prepare('UPDATE users SET status_kind = ?, status_emoji = ?, status_text = ?, status_until = ?, status_auto = ? WHERE id = ?');
+// auto = true: Knock set it (no end time). The callers decide whether that is allowed; this just writes. An unknown kind clears it.
+export function saveStatus(id, kind, { until = null, auto = false } = {}) {
+  const preset = STATUS_PRESETS[kind];
+  if (!preset) writeStatus.run(null, null, null, null, 0, id);
+  else writeStatus.run(kind, preset[0], preset[1], until, auto ? 1 : 0, id);
+}
+export const clearStatus = (id) => saveStatus(id, null);
 
 // Blocking helpers. hasBlocked(a, b): a blocked b. blockedEither: either of them blocked the other.
 const blockOne = db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?');
@@ -287,12 +338,18 @@ export function createSession(ownerId = null) {
 }
 export const sessionExists = (id) => !!db.prepare('SELECT 1 FROM call_sessions WHERE id = ?').get(id);
 export const sessionInfo = (id) => db.prepare('SELECT owner_id, ended_at FROM call_sessions WHERE id = ?').get(id) ?? null;
-export const endSession = (id) => db.prepare('UPDATE call_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(Date.now(), id);
+// A repeating call keeps one standing link: the host ending it sends everyone out, but the code works again at the next one.
+export const isStandingSession = (id) => !!db.prepare("SELECT 1 FROM appointments WHERE session_id = ? AND recurrence <> 'none'").get(id);
+export const endSession = (id) => {
+  if (isStandingSession(id)) return;
+  db.prepare('UPDATE call_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(Date.now(), id);
+};
 
 export function purgeExpired() {
   const now = Date.now();
   db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').run(now);
   db.prepare('DELETE FROM otps WHERE expires_at < ?').run(now);
+  db.exec('DELETE FROM push_subscriptions WHERE session_hash NOT IN (SELECT token_hash FROM auth_sessions)');
   // Pictures whose message is gone (a deleted group, a removed account) and reactions on messages that no longer exist.
   db.exec(`DELETE FROM chat_images WHERE id NOT IN (SELECT image_id FROM messages WHERE image_id IS NOT NULL)
              AND id NOT IN (SELECT image_id FROM group_messages WHERE image_id IS NOT NULL)`);
