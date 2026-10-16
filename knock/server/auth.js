@@ -67,6 +67,16 @@ async function deliver(channel, to, code) {
   const text = `Your Knock code is ${code}. It expires in 10 minutes. If you didn't ask for it, ignore this message.`;
   if (channel === 'email' && mailer) {
     await mailer.sendMail({ from: process.env.MAIL_FROM, to, subject: 'Your Knock sign-in code', text });
+  } else if (channel === 'email' && process.env.BREVO_API_KEY) {
+    // Email over HTTPS (Brevo's API). Use this where outgoing SMTP ports are blocked, such as free hosting tiers.
+    const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(process.env.MAIL_FROM || '');
+    const sender = m ? { name: m[1].trim() || 'Knock', email: m[2].trim() } : { name: 'Knock', email: (process.env.MAIL_FROM || '').trim() };
+    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': process.env.BREVO_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ sender, to: [{ email: to }], subject: 'Your Knock sign-in code', textContent: text }),
+    });
+    if (!r.ok) throw new Error(`Brevo responded ${r.status}: ${(await r.text()).slice(0, 200)}`);
   } else if (channel === 'phone' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM) {
     const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_FROM: from } = process.env;
     const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
