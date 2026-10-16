@@ -77,6 +77,20 @@ async function deliver(channel, to, code) {
       body: JSON.stringify({ sender, to: [{ email: to }], subject: 'Your Knock sign-in code', textContent: text }),
     });
     if (!r.ok) throw new Error(`Brevo responded ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  } else if (channel === 'email' && process.env.EMAILJS_SERVICE_ID && process.env.EMAILJS_TEMPLATE_ID && process.env.EMAILJS_PUBLIC_KEY && process.env.EMAILJS_PRIVATE_KEY) {
+    // Email through EmailJS's REST API (it sends via your own connected Gmail). Server-side only: the private key never reaches the browser.
+    const r = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        service_id: process.env.EMAILJS_SERVICE_ID,
+        template_id: process.env.EMAILJS_TEMPLATE_ID,
+        user_id: process.env.EMAILJS_PUBLIC_KEY,
+        accessToken: process.env.EMAILJS_PRIVATE_KEY,
+        template_params: { to_email: to, code, message: text },
+      }),
+    });
+    if (!r.ok) throw new Error(`EmailJS responded ${r.status}: ${(await r.text()).slice(0, 200)}`);
   } else if (channel === 'phone' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM) {
     const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_FROM: from } = process.env;
     const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
@@ -183,7 +197,8 @@ auth.post('/google', authLimiter, async (req, res) => {
     });
     issueSession(res, user.id);
     res.json({ ok: true });
-  } catch {
+  } catch (err) {
+    console.error('Google sign-in failed:', err.message); // shows the real reason in the server logs
     res.status(401).json({ error: 'google_failed' });
   }
 });
