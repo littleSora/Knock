@@ -142,29 +142,22 @@ function appearance() {
 }
 
 /* =====================================================================================
-   Sign-in & contact: change email / phone with a code sent to the new one
+   Sign-in: change your email (with a code sent to the new one) and your password
    ===================================================================================== */
 function contactRow(channel) {
   const isEmail = channel === 'email';
-  const label = isEmail ? 'Gmail / email' : 'Mobile number';
+  const label = 'Email';
   const row = h('div', { class: 'contact' });
   let step = 'view'; // view | enter | code
   let pending = '';
 
-  async function remove() {
-    const ok = await confirmDialog({ title: `Remove your ${isEmail ? 'email' : 'phone number'}?`, body: `You won’t be able to sign in with it anymore. You can add one again later.`, confirmText: 'Remove', cancelText: 'Keep it' });
-    if (!ok) return;
-    try { await api('/api/auth/contact/' + channel, { method: 'DELETE' }); me[channel] = null; toast('Removed'); step = 'view'; render(); }
-    catch (err) { toast(errText(err)); }
-  }
   function render() {
     const msg = h('p', { class: 'error', role: 'alert' });
     const value = me[channel];
     const head = h('div', { class: 'contact-head' },
       h('div', {}, h('div', { class: 'sub' }, label), h('div', { class: 'name wrap' }, value || 'n/a')),
       step === 'view' ? h('div', { class: 'contact-actions' },
-        h('button', { type: 'button', class: 'btn sm', onclick: () => { step = 'enter'; render(); } }, value ? 'Change' : 'Add'),
-        value ? h('button', { type: 'button', class: 'link-btn danger', onclick: remove }, 'Remove') : null) : null);
+        h('button', { type: 'button', class: 'btn sm', onclick: () => { step = 'enter'; render(); } }, value ? 'Change' : 'Add')) : null);
     let form = null;
     if (step === 'enter') {
       const input = h('input', { id: `new-${channel}`, type: isEmail ? 'email' : 'tel', autocomplete: isEmail ? 'email' : 'tel', required: true, 'data-autofocus': '', placeholder: isEmail ? 'new@gmail.com' : '+639171234567' });
@@ -201,14 +194,44 @@ function contactRow(channel) {
   return row;
 }
 
+function passwordRow() {
+  const row = h('div', { class: 'contact' });
+  let open = false;
+  function render() {
+    const msg = h('p', { class: 'error', role: 'alert' });
+    const head = h('div', { class: 'contact-head' },
+      h('div', {}, h('div', { class: 'sub' }, 'Password'), h('div', { class: 'name wrap' }, me.has_password ? 'Set' : 'Not set yet')),
+      open ? null : h('div', { class: 'contact-actions' },
+        h('button', { type: 'button', class: 'btn sm', onclick: () => { open = true; render(); } }, me.has_password ? 'Change' : 'Set a password')));
+    let form = null;
+    if (open) {
+      const cur = me.has_password ? h('input', { id: 'pw-cur', type: 'password', autocomplete: 'current-password', required: true, 'data-autofocus': '' }) : null;
+      const next = h('input', { id: 'pw-new', type: 'password', autocomplete: 'new-password', minlength: '8', maxlength: '128', required: true });
+      const go = h('button', { class: 'btn sm' }, 'Save password');
+      form = h('form', { class: 'contact-form' },
+        cur ? h('label', { for: 'pw-cur' }, 'Current password') : null, cur,
+        h('label', { for: 'pw-new' }, 'New password'), next,
+        h('p', { class: 'hint' }, 'At least 8 characters. Your other devices will be signed out.'),
+        h('div', { class: 'set-actions' }, go, h('button', { type: 'button', class: 'link-btn', onclick: () => { open = false; render(); } }, 'Cancel')), msg);
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault(); msg.textContent = ''; go.disabled = true;
+        try {
+          await api('/api/auth/password', { method: 'POST', body: { current: cur?.value, password: next.value } });
+          me.has_password = true; open = false; toast('Password updated'); render();
+        } catch (err) { go.disabled = false; msg.textContent = errText(err); }
+      });
+      queueMicrotask(() => (cur ?? next).focus());
+    }
+    row.replaceChildren(...[head, form].filter(Boolean));
+  }
+  render();
+  return row;
+}
+
 function signIn() {
-  return section('siH', 'Email, phone and sign-in',
-    h('p', { class: 'hint' }, 'These are the ways you can sign in. A new email or number only replaces the old one after you enter the code we send to it.'),
-    contactRow('email'), contactRow('phone'),
-    h('div', { class: 'contact' }, h('div', { class: 'contact-head' }, h('div', {},
-      h('div', { class: 'sub' }, 'Google'),
-      h('div', { class: 'name wrap' }, me.has_google ? 'Linked' : 'Not linked'),
-      me.has_google ? null : h('p', { class: 'hint' }, 'Sign in once with “Continue with Google” using the same email address as above and it links automatically.')))));
+  return section('siH', 'Email and password',
+    h('p', { class: 'hint' }, 'You log in with your email and password. A new email only replaces the old one after you enter the code we send to it.'),
+    contactRow('email'), passwordRow());
 }
 
 /* =====================================================================================

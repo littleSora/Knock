@@ -49,7 +49,7 @@ function removeMessage(table, kind, m) {
 }
 
 /* ---------- public-by-design config (secrets never appear here) ---------- */
-api.get('/config', (_req, res) => res.json({ googleClientId: process.env.GOOGLE_CLIENT_ID || null, devMode: !isProd }));
+api.get('/config', (_req, res) => res.json({ devMode: !isProd }));
 
 // Short-lived TURN credentials (coturn "use-auth-secret"): the TURN secret itself stays on the server.
 api.get('/ice', (_req, res) => {
@@ -93,8 +93,8 @@ api.get('/avatars/:handle', (req, res) => {
 api.get('/me', needUser, (req, res) => {
   const u = db
     .prepare(
-      `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email, phone,
-         google_sub IS NOT NULL AS has_google, created_at, theme, chat_activity AS share_activity,
+      `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email,
+         password_hash IS NOT NULL AS has_password, created_at, theme, chat_activity AS share_activity,
          first_name, last_name, middle_initial, birthday, workplace, country,
          (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at
        FROM users WHERE id = ?`,
@@ -103,7 +103,7 @@ api.get('/me', needUser, (req, res) => {
   let theme = null;
   try { theme = u.theme ? JSON.parse(u.theme) : null; } catch { /* ignore a bad stored value */ }
   delete u.theme;
-  res.json({ user: { ...u, has_google: !!u.has_google, share_activity: !!u.share_activity, status: statusOf(req.user.id) }, theme });
+  res.json({ user: { ...u, has_password: !!u.has_password, share_activity: !!u.share_activity, status: statusOf(req.user.id) }, theme });
 });
 
 // The look of the app is saved on the account so it follows the person to every device.

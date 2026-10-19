@@ -103,7 +103,6 @@ async function openAccount(user) {
       } catch (err) { msg.textContent = errText(err); }
     });
 
-    const methods = [me.has_google && 'Google', me.email && 'Email code', me.phone && 'Phone code'].filter(Boolean).join(', ') || 'n/a';
     const na = (v) => v || 'n/a';
     body.replaceChildren(
       h('div', { class: 'profile-head', style: 'margin-top:0' },
@@ -118,9 +117,8 @@ async function openAccount(user) {
       h('dl', { class: 'facts-list' },
         h('dt', {}, 'Username'), h('dd', {}, '@' + me.handle),
         h('dt', {}, 'Name at signup'), h('dd', {}, me.signup_name),
-        h('dt', {}, 'Gmail / email'), h('dd', {}, na(me.email)),
-        h('dt', {}, 'Mobile number'), h('dd', {}, na(me.phone)),
-        h('dt', {}, 'Sign-in methods'), h('dd', {}, methods),
+        h('dt', {}, 'Email'), h('dd', {}, na(me.email)),
+        h('dt', {}, 'Sign-in'), h('dd', {}, me.has_password ? 'Email and password' : 'Email (set a password in Settings)'),
         h('dt', {}, 'Account created'), h('dd', {}, fmtDate(me.created_at))),
       // In a call, Settings opens in a new tab so you don't leave the call.
       h('a', { class: 'btn sm settings-link', href: '/settings', ...(inCall ? { target: '_blank', rel: 'noopener' } : {}) }, h('span', { class: 'btn-ic' }, icon('gear', 16)), 'Settings'));

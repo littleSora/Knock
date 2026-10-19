@@ -3,35 +3,63 @@
 <header id="topbar" class="topbar"></header>
 <main class="auth">
   <section>
-    <h1>Log in or create an account</h1>
-    <p class="lede">The steps are the same either way. We create your account the first time you sign in.</p>
+    <h1 id="title">Log in</h1>
+    <p id="lede" class="lede">Welcome back. Log in with the email and password you signed up with.</p>
   </section>
   <section class="ticket">
-    <div class="tabs" role="tablist" aria-label="Sign-in method">
-      <button class="tab on" role="tab" data-tab="phone">Phone</button>
-      <button class="tab" role="tab" data-tab="email">Email</button>
-      <button class="tab" role="tab" data-tab="google">Google</button>
+    <div class="tabs" role="tablist" aria-label="Log in or create an account" id="tabs">
+      <button class="tab on" role="tab" data-mode="login">Log in</button>
+      <button class="tab" role="tab" data-mode="signup">Create account</button>
     </div>
-    <form id="req">
-      <label id="targetLabel" for="target">Phone number</label>
-      <input id="target" autocomplete="tel" required>
-      <p id="targetHint" class="hint">Include your country code, like +63 for the Philippines.</p>
+
+    <form id="loginForm">
+      <label for="liEmail">Email</label>
+      <input id="liEmail" type="email" autocomplete="email" placeholder="you@gmail.com" required>
+      <label for="liPass">Password</label>
+      <input id="liPass" type="password" autocomplete="current-password" maxlength="128" required>
+      <button class="btn primary">Log in</button>
+      <button type="button" id="forgot" class="link-btn">Forgot password?</button>
+    </form>
+
+    <form id="signupForm" hidden>
+      <label for="suName">Your name</label>
+      <input id="suName" autocomplete="name" maxlength="40" required>
+      <label for="suEmail">Email</label>
+      <input id="suEmail" type="email" autocomplete="email" placeholder="you@gmail.com" required>
+      <label for="suPass">Password</label>
+      <input id="suPass" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+      <p class="hint">At least 8 characters. We’ll email you a code to confirm the address before the account is created.</p>
       <button class="btn primary">Send code</button>
     </form>
-    <form id="verify" hidden>
-      <label for="code">6-digit code</label>
-      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
-      <p id="sentTo" class="hint"></p>
-      <button class="btn primary">Verify and continue</button>
-      <button type="button" id="back" class="link-btn">Use something else</button>
+
+    <form id="signupCode" hidden>
+      <label for="suCode">6-digit code</label>
+      <input id="suCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+      <p id="suSent" class="hint"></p>
+      <button class="btn primary">Create my account</button>
+      <button type="button" id="suBack" class="link-btn">Use a different email</button>
     </form>
-    <div id="googlePane" hidden>
-      <p>Continue with the Google account you use for Gmail.</p>
-      <div id="gbtn"></div>
-      <p id="gnote" class="hint"></p>
-    </div>
+
+    <form id="resetReq" hidden>
+      <label for="rsEmail">Email on your account</label>
+      <input id="rsEmail" type="email" autocomplete="email" required>
+      <p class="hint">We’ll email a code so you can choose a new password. Accounts made before passwords existed set theirs here.</p>
+      <button class="btn primary">Send code</button>
+      <button type="button" class="link-btn" data-back>Back to log in</button>
+    </form>
+
+    <form id="resetDo" hidden>
+      <label for="rsCode">6-digit code</label>
+      <input id="rsCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+      <label for="rsPass">New password</label>
+      <input id="rsPass" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+      <p id="rsSent" class="hint"></p>
+      <button class="btn primary">Set password and log in</button>
+      <button type="button" class="link-btn" data-back>Back to log in</button>
+    </form>
+
     <p id="msg" class="error" role="alert"></p>
-    <p id="devHint" class="hint" hidden>Dev mode: the code is printed in the server console.</p>
+    <p id="devHint" class="hint" hidden>Dev mode: codes are printed in the server terminal.</p>
   </section>
 </main>
 <script src="/socket.io/socket.io.js"></script>

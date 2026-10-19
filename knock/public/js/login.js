@@ -9,70 +9,55 @@ if (user) go();
 mountTopbar(null);
 $('devHint').hidden = !cfg.devMode;
 
-let channel = 'phone';
-let target = '';
-const LABELS = {
-  phone: ['Phone number', 'tel', '+63 917 123 4567', 'Include your country code, like +63 for the Philippines.'],
-  email: ['Email address', 'email', 'you@gmail.com', 'Gmail or any other address works.'],
+const FORMS = ['loginForm', 'signupForm', 'signupCode', 'resetReq', 'resetDo'];
+const COPY = {
+  login: ['Log in', 'Welcome back. Log in with the email and password you signed up with.'],
+  signup: ['Create an account', 'New here? Make an account with your email. You’ll confirm it with a code we send you.'],
+  reset: ['Reset your password', 'Confirm your email with a code, then choose a new password.'],
 };
-
-function showTab(name) {
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+function show(form, copy = form === 'loginForm' ? 'login' : form.startsWith('signup') ? 'signup' : 'reset') {
+  FORMS.forEach((f) => ($(f).hidden = f !== form));
   $('msg').textContent = '';
-  $('verify').hidden = true;
-  $('googlePane').hidden = name !== 'google';
-  $('req').hidden = name === 'google';
-  if (name === 'google') return initGoogle();
-  channel = name;
-  const [label, autocomplete, placeholder, hint] = LABELS[name];
-  $('targetLabel').textContent = label;
-  $('target').setAttribute('autocomplete', autocomplete);
-  $('target').type = name === 'email' ? 'email' : 'tel';
-  $('target').placeholder = placeholder;
-  $('target').value = '';
-  $('targetHint').textContent = hint;
+  $('title').textContent = COPY[copy][0];
+  $('lede').textContent = COPY[copy][1];
+  $('tabs').hidden = form !== 'loginForm' && form !== 'signupForm';
+  document.querySelectorAll('#tabs .tab').forEach((t) => t.classList.toggle('on', (t.dataset.mode === 'login') === (form === 'loginForm')));
+  $(form).querySelector('input')?.focus();
 }
-document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
+document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => show(t.dataset.mode === 'login' ? 'loginForm' : 'signupForm')));
+document.querySelectorAll('[data-back]').forEach((b) => b.addEventListener('click', () => show('loginForm')));
+$('forgot').addEventListener('click', () => { $('rsEmail').value = $('liEmail').value; show('resetReq'); });
+show(new URLSearchParams(location.search).get('mode') === 'signup' ? 'signupForm' : 'loginForm');
 
-$('req').addEventListener('submit', async (e) => {
+const submit = (id, fn) => $(id).addEventListener('submit', async (e) => {
   e.preventDefault();
   $('msg').textContent = '';
-  target = $('target').value.trim();
-  try {
-    await api('/api/auth/otp/request', { method: 'POST', body: { channel, target } });
-    $('req').hidden = true;
-    $('verify').hidden = false;
-    $('sentTo').textContent = `We sent a 6-digit code to ${target}. It expires in 10 minutes.`;
-    $('code').focus();
-  } catch (err) { $('msg').textContent = errText(err); }
+  const btn = $(id).querySelector('.btn.primary');
+  btn.disabled = true;
+  try { await fn(); } catch (err) { $('msg').textContent = errText(err); } finally { btn.disabled = false; }
 });
-$('verify').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  $('msg').textContent = '';
-  try {
-    await api('/api/auth/otp/verify', { method: 'POST', body: { channel, target, code: $('code').value } });
-    go();
-  } catch (err) { $('msg').textContent = errText(err); }
-});
-$('back').addEventListener('click', () => showTab(channel));
+const post = (path, body) => api('/api/auth/' + path, { method: 'POST', body });
 
-let googleReady = false;
-function initGoogle() {
-  if (googleReady) return;
-  if (!cfg.googleClientId) { $('gnote').textContent = 'Google sign-in isn’t set up on this server yet (GOOGLE_CLIENT_ID is empty).'; return; }
-  googleReady = true;
-  const s = document.createElement('script');
-  s.src = 'https://accounts.google.com/gsi/client';
-  s.async = true;
-  s.onload = () => {
-    window.google.accounts.id.initialize({
-      client_id: cfg.googleClientId,
-      callback: async ({ credential }) => {
-        try { await api('/api/auth/google', { method: 'POST', body: { credential } }); go(); }
-        catch (err) { $('msg').textContent = errText(err); }
-      },
-    });
-    window.google.accounts.id.renderButton($('gbtn'), { theme: 'outline', size: 'large', text: 'continue_with', shape: 'pill' });
-  };
-  document.head.append(s);
-}
+// Log in: only works for an account that was created.
+submit('loginForm', async () => { await post('login', { email: $('liEmail').value, password: $('liPass').value }); go(); });
+
+// Create an account: the account is only made once the emailed code is entered.
+let pendingEmail = '';
+submit('signupForm', async () => {
+  pendingEmail = $('suEmail').value.trim();
+  await post('signup/request', { name: $('suName').value, email: pendingEmail, password: $('suPass').value });
+  $('suSent').textContent = `We sent a 6-digit code to ${pendingEmail}. It expires in 10 minutes.`;
+  show('signupCode', 'signup');
+});
+submit('signupCode', async () => { await post('signup/verify', { email: pendingEmail, code: $('suCode').value }); go(); });
+$('suBack').addEventListener('click', () => show('signupForm'));
+
+// Forgot password.
+let resetEmail = '';
+submit('resetReq', async () => {
+  resetEmail = $('rsEmail').value.trim();
+  await post('reset/request', { email: resetEmail });
+  $('rsSent').textContent = `If an account uses ${resetEmail}, we sent it a 6-digit code.`;
+  show('resetDo', 'reset');
+});
+submit('resetDo', async () => { await post('reset/verify', { email: resetEmail, code: $('rsCode').value, password: $('rsPass').value }); go(); });

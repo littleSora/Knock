@@ -349,6 +349,7 @@ export function purgeExpired() {
   const now = Date.now();
   db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').run(now);
   db.prepare('DELETE FROM otps WHERE expires_at < ?').run(now);
+  db.prepare('DELETE FROM pending_signups WHERE expires_at < ?').run(now);
   db.exec('DELETE FROM push_subscriptions WHERE session_hash NOT IN (SELECT token_hash FROM auth_sessions)');
   // Pictures whose message is gone (a deleted group, a removed account) and reactions on messages that no longer exist.
   db.exec(`DELETE FROM chat_images WHERE id NOT IN (SELECT image_id FROM messages WHERE image_id IS NOT NULL)
@@ -361,3 +362,13 @@ export function purgeExpired() {
        AND id NOT IN (SELECT session_id FROM recap_items)`, // keep sessions whose recap people still want to read
   ).run(now - 48 * 3600 * 1000);
 }
+
+// Email + password accounts. password_hash is NULL for older accounts that were made before passwords existed (they set one
+// with "Forgot password"). pending_signups holds a new sign-up until its emailed code is entered; only then is a user created.
+ensureColumn('users', 'password_hash', 'TEXT');
+db.exec(`CREATE TABLE IF NOT EXISTS pending_signups (
+  email TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  pw_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+)`);

@@ -57,7 +57,7 @@ export function mountTopbar(user) {
   S.meId = user?.id ?? null;
   const brand = h('a', { class: 'brand', href: user ? '/dashboard' : '/' }, h('span', { class: 'brand-mark' }, 'K'), 'Knock');
   if (!user) {
-    bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('a', { class: 'btn ghost sm', href: '/login' }, 'Log in'), h('a', { class: 'btn sm', href: '/login' }, 'Sign up')));
+    bar.replaceChildren(brand, h('nav', { class: 'bar-right' }, h('a', { class: 'btn ghost sm', href: '/login' }, 'Log in'), h('a', { class: 'btn sm', href: '/login?mode=signup' }, 'Sign up')));
     return;
   }
   const { search, friendsBtn, chatsBtn, bellBtn } = buildTools();

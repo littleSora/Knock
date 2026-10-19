@@ -24,11 +24,11 @@ app.use(
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
-        'script-src': ["'self'", 'https://www.google.com/recaptcha/', 'https://www.gstatic.com/recaptcha/', 'https://accounts.google.com/gsi/client'],
-        'frame-src': ['https://www.google.com/recaptcha/', 'https://recaptcha.google.com/recaptcha/', 'https://accounts.google.com/gsi/'],
-        'connect-src': ["'self'", 'https://accounts.google.com/gsi/'],
-        'img-src': ["'self'", 'data:', 'https://*.googleusercontent.com'],
-        'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://accounts.google.com/gsi/style'],
+        'script-src': ["'self'", 'https://www.google.com/recaptcha/', 'https://www.gstatic.com/recaptcha/'],
+        'frame-src': ['https://www.google.com/recaptcha/', 'https://recaptcha.google.com/recaptcha/'],
+        'connect-src': ["'self'"],
+        'img-src': ["'self'", 'data:'],
+        'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
         'font-src': ["'self'", 'https://fonts.gstatic.com'],
         'media-src': ["'self'", 'blob:'],
         ...(isProd ? {} : { 'upgrade-insecure-requests': null }),
