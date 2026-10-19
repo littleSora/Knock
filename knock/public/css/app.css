@@ -53,6 +53,11 @@ form .btn { margin-top: 1rem; }
 .tab.on { color: var(--on-yellow); border-color: var(--ink); background: var(--yellow); border-radius: 10px; }
 .count { margin-left: 0.4rem; padding: 0 0.4rem; background: var(--pink); color: var(--on-pink); border-radius: 999px; font-size: 0.78rem; }
 
+/* ----- login / reset forms: phone friendly ----- */
+.link-row { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.4rem; }
+input.otp { font-size: 1.6rem; letter-spacing: 0.4em; text-align: center; font-variant-numeric: tabular-nums; }
+input.otp::placeholder { letter-spacing: 0.2em; }
+.link-btn:disabled { opacity: 0.55; cursor: default; text-decoration: none; }
 /* ----- ticket + room code tiles (the one memorable thing) ----- */
 .ticket { background: var(--card); border: 2px solid var(--ink); border-radius: 20px; box-shadow: 6px 6px 0 var(--ink); padding: 1.5rem; }
 .ticket hr { border: 0; border-top: 2px dashed var(--line); margin: 1.5rem 0; }
@@ -424,3 +429,13 @@ input.bright { padding: 0; margin-top: 0.3rem; -webkit-appearance: none; appeara
 .status-editor .hint .status-chip { max-width: none; vertical-align: middle; }
 .status-for { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; font-size: 0.9rem; color: var(--mute); }
 .status-for select { width: auto; flex: 1; }
+
+@media (max-width: 600px) {
+  /* 16px+ text stops iOS Safari zooming the page when a field is tapped; 44px is a comfortable touch target. */
+  input:not([type='checkbox'], [type='radio'], [type='range']), textarea, select { font-size: 1rem; }
+  .auth input, .auth .btn, .auth .tab { min-height: 2.75rem; }
+  .auth form .btn.primary { width: 100%; }
+  .auth .link-btn { padding: 0.65rem 0.4rem; font-size: 1rem; }
+  .ticket { padding: 1.1rem; box-shadow: 4px 4px 0 var(--ink); }
+  .lede { font-size: 1.05rem; }
+}

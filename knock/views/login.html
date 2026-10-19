@@ -34,7 +34,7 @@
 
     <form id="signupCode" hidden>
       <label for="suCode">6-digit code</label>
-      <input id="suCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+      <input id="suCode" class="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" placeholder="••••••" required>
       <p id="suSent" class="hint"></p>
       <button class="btn primary">Create my account</button>
       <button type="button" id="suBack" class="link-btn">Use a different email</button>
@@ -45,17 +45,23 @@
       <input id="rsEmail" type="email" autocomplete="email" required>
       <p class="hint">We’ll email a code so you can choose a new password. Accounts made before passwords existed set theirs here.</p>
       <button class="btn primary">Send code</button>
-      <button type="button" class="link-btn" data-back>Back to log in</button>
+      <div class="link-row">
+        <button type="button" id="haveCode" class="link-btn">I already have a code</button>
+        <button type="button" class="link-btn" data-back>Back to log in</button>
+      </div>
     </form>
 
     <form id="resetDo" hidden>
       <label for="rsCode">6-digit code</label>
-      <input id="rsCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+      <input id="rsCode" class="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" placeholder="••••••" required>
       <label for="rsPass">New password</label>
       <input id="rsPass" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
       <p id="rsSent" class="hint"></p>
       <button class="btn primary">Set password and log in</button>
-      <button type="button" class="link-btn" data-back>Back to log in</button>
+      <div class="link-row">
+        <button type="button" id="resend" class="link-btn">Send a new code</button>
+        <button type="button" class="link-btn" data-back>Back to log in</button>
+      </div>
     </form>
 
     <p id="msg" class="error" role="alert"></p>

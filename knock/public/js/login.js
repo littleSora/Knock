@@ -27,7 +27,29 @@ function show(form, copy = form === 'loginForm' ? 'login' : form.startsWith('sig
 document.querySelectorAll('#tabs .tab').forEach((t) => t.addEventListener('click', () => show(t.dataset.mode === 'login' ? 'loginForm' : 'signupForm')));
 document.querySelectorAll('[data-back]').forEach((b) => b.addEventListener('click', () => show('loginForm')));
 $('forgot').addEventListener('click', () => { $('rsEmail').value = $('liEmail').value; show('resetReq'); });
-show(new URLSearchParams(location.search).get('mode') === 'signup' ? 'signupForm' : 'loginForm');
+document.querySelectorAll('[data-back]').forEach((b) => b.addEventListener('click', () => store.set('knock-reset-email', '')));
+
+// Forgot password. On a phone people leave to read the email and the page may reload, so the email is kept for this tab.
+const store = { get: (k) => { try { return sessionStorage.getItem(k) || ''; } catch { return ''; } }, set: (k, v) => { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch { /* storage blocked: fine */ } } };
+let resetEmail = '';
+const goToResetStep = (email) => {
+  resetEmail = email;
+  store.set('knock-reset-email', email);
+  $('rsSent').textContent = `If an account uses ${email}, we sent it a 6-digit code. It expires in 10 minutes.`;
+  show('resetDo', 'reset');
+};
+
+const params = new URLSearchParams(location.search);
+const linkEmail = (params.get('email') || '').trim().slice(0, 254);
+if (params.get('mode') === 'reset') {
+  // Opened from the link in the reset email: jump straight to "enter code + new password".
+  if (linkEmail) goToResetStep(linkEmail); else show('resetReq');
+  history.replaceState(null, '', location.pathname); // keep the email address out of the address bar and history
+} else if (store.get('knock-reset-email') && params.get('mode') !== 'signup') {
+  goToResetStep(store.get('knock-reset-email'));
+} else {
+  show(params.get('mode') === 'signup' ? 'signupForm' : 'loginForm');
+}
 
 const submit = (id, fn) => $(id).addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -52,12 +74,38 @@ submit('signupForm', async () => {
 submit('signupCode', async () => { await post('signup/verify', { email: pendingEmail, code: $('suCode').value }); go(); });
 $('suBack').addEventListener('click', () => show('signupForm'));
 
-// Forgot password.
-let resetEmail = '';
 submit('resetReq', async () => {
-  resetEmail = $('rsEmail').value.trim();
-  await post('reset/request', { email: resetEmail });
-  $('rsSent').textContent = `If an account uses ${resetEmail}, we sent it a 6-digit code.`;
-  show('resetDo', 'reset');
+  const email = $('rsEmail').value.trim();
+  await post('reset/request', { email });
+  goToResetStep(email);
 });
-submit('resetDo', async () => { await post('reset/verify', { email: resetEmail, code: $('rsCode').value, password: $('rsPass').value }); go(); });
+submit('resetDo', async () => {
+  await post('reset/verify', { email: resetEmail, code: $('rsCode').value, password: $('rsPass').value });
+  store.set('knock-reset-email', '');
+  go();
+});
+// Already have a code (or the email took a while): skip to the code step.
+$('haveCode').addEventListener('click', () => {
+  const email = $('rsEmail').value.trim();
+  if (!email || !$('rsEmail').checkValidity()) { $('msg').textContent = 'Type your email above first.'; $('rsEmail').focus(); return; }
+  goToResetStep(email);
+});
+// Ask for another code (the server allows one every 30 seconds).
+let cooldown;
+$('resend').addEventListener('click', async () => {
+  const btn = $('resend');
+  $('msg').textContent = '';
+  btn.disabled = true;
+  try {
+    await post('reset/request', { email: resetEmail });
+    $('rsSent').textContent = `We sent a new code to ${resetEmail} if an account uses it. Use the newest one.`;
+  } catch (err) { $('msg').textContent = errText(err); }
+  let left = 30;
+  clearInterval(cooldown);
+  cooldown = setInterval(() => {
+    btn.textContent = left > 0 ? `Send a new code (${left--}s)` : 'Send a new code';
+    if (left < 0) { clearInterval(cooldown); btn.disabled = false; }
+  }, 1000);
+});
+// Codes are digits only: drop spaces or dashes if someone pastes "123 456".
+for (const id of ['suCode', 'rsCode']) $(id).addEventListener('input', (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });

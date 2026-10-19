@@ -12,6 +12,8 @@ if (isProd) {
 
 export const cfg = {
   port: Number(e.PORT) || 3000,
+  // Used for the link in emails. Set PUBLIC_URL on your host (no trailing slash).
+  publicUrl: (e.PUBLIC_URL || (isProd ? 'https://knock-0rsz.onrender.com' : `http://localhost:${Number(e.PORT) || 3000}`)).replace(/\/+$/, ''),
   cookieSecret: e.COOKIE_SECRET || 'dev-only-secret-do-not-use-in-production',
   trustProxy: /^\d+$/.test(e.TRUST_PROXY || '') ? Number(e.TRUST_PROXY) : e.TRUST_PROXY || false,
 };

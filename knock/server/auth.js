@@ -81,9 +81,17 @@ function createUser({ email, name, pwHash }) {
 /* ---------- one-time codes, sent by email (verify a new account, reset a password, change email) ---------- */
 const mailer = process.env.SMTP_URL ? nodemailer.createTransport(process.env.SMTP_URL) : null;
 
-async function deliver(to, code) {
-  const text = `Your Knock code is ${code}. It expires in 10 minutes. If you didn't ask for it, ignore this message.`;
-  const subject = 'Your Knock verification code';
+const MAIL = {
+  verify: { subject: 'Your Knock verification code', text: (code) => `Your Knock code is ${code}. It expires in 10 minutes. If you didn't ask for it, ignore this message.` },
+  reset: { subject: 'Reset your Knock password', text: (code) => `Your Knock password reset code is ${code}. It expires in 10 minutes. If you didn't ask to reset your password, ignore this message and your password stays the same.` },
+};
+
+// kind: 'verify' (new account, change email) or 'reset' (forgot password). extra: more EmailJS template variables (name, reset_link).
+async function deliver(to, code, kind = 'verify', extra = {}) {
+  const { subject } = MAIL[kind];
+  const text = MAIL[kind].text(code);
+  // A reset can use its own EmailJS template (EMAILJS_RESET_TEMPLATE_ID); without one it falls back to the general template.
+  const templateId = (kind === 'reset' && process.env.EMAILJS_RESET_TEMPLATE_ID) || process.env.EMAILJS_TEMPLATE_ID;
   if (mailer) {
     await mailer.sendMail({ from: process.env.MAIL_FROM, to, subject, text });
   } else if (process.env.BREVO_API_KEY) {
@@ -96,22 +104,22 @@ async function deliver(to, code) {
       body: JSON.stringify({ sender, to: [{ email: to }], subject, textContent: text }),
     });
     if (!r.ok) throw new Error(`Brevo responded ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  } else if (process.env.EMAILJS_SERVICE_ID && process.env.EMAILJS_TEMPLATE_ID && process.env.EMAILJS_PUBLIC_KEY && process.env.EMAILJS_PRIVATE_KEY) {
+  } else if (process.env.EMAILJS_SERVICE_ID && templateId && process.env.EMAILJS_PUBLIC_KEY && process.env.EMAILJS_PRIVATE_KEY) {
     // Email through EmailJS's REST API (it sends via your own connected Gmail). Server-side only: the private key never reaches the browser.
     const r = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         service_id: process.env.EMAILJS_SERVICE_ID,
-        template_id: process.env.EMAILJS_TEMPLATE_ID,
+        template_id: templateId,
         user_id: process.env.EMAILJS_PUBLIC_KEY,
         accessToken: process.env.EMAILJS_PRIVATE_KEY,
-        template_params: { to_email: to, code, message: text },
+        template_params: { to_email: to, code, message: text, subject, kind, app_name: 'Knock', expires_in: '10 minutes', name: '', reset_link: cfg.publicUrl + '/login', ...extra },
       }),
     });
     if (!r.ok) throw new Error(`EmailJS responded ${r.status}: ${(await r.text()).slice(0, 200)}`);
   } else if (!isProd) {
-    console.log(`\n[dev] email code for ${to}: ${code}\n`); // no email provider configured: print instead of sending
+    console.log(`\n[dev] ${kind === 'reset' ? 'password reset' : 'email'} code for ${to}: ${code}\n`); // no email provider configured: print instead of sending
   } else {
     throw new Error('No email provider configured');
   }
@@ -134,7 +142,7 @@ auth.get('/me', (req, res) => {
 });
 
 // `key` is what the code is stored under: "signup:<email>", "reset:<email>" or "chg:<user>:email:<email>", so the flows can never overwrite each other.
-async function sendOtp(key, to) {
+async function sendOtp(key, to, kind = 'verify', extra = {}) {
   const prev = db.prepare('SELECT expires_at FROM otps WHERE target = ?').get(key);
   if (prev && prev.expires_at - OTP_TTL > Date.now() - 30_000) return 'wait_before_resend';
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
@@ -142,7 +150,7 @@ async function sendOtp(key, to) {
     key, hmac(cfg.cookieSecret, `${key}:${code}`), Date.now() + OTP_TTL,
   );
   try {
-    await deliver(to, code);
+    await deliver(to, code, kind, extra);
   } catch (err) {
     console.error('Code delivery failed:', err.message);
     return 'delivery_failed';
@@ -217,8 +225,12 @@ auth.post('/login', authLimiter, async (req, res) => {
 auth.post('/reset/request', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   if (!email) return res.status(400).json({ error: 'invalid_email' });
-  if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) {
-    const fail = await sendOtp(`reset:${email}`, email);
+  const account = db.prepare('SELECT display_name FROM users WHERE email = ?').get(email);
+  if (account) {
+    const fail = await sendOtp(`reset:${email}`, email, 'reset', {
+      name: account.display_name || '',
+      reset_link: `${cfg.publicUrl}/login?mode=reset&email=${encodeURIComponent(email)}`, // opens the "enter code + new password" step with the email filled in
+    });
     if (fail === 'delivery_failed') return res.status(502).json({ error: fail });
   } else if (!isProd) {
     console.log(`\n[dev] password reset asked for ${email}, but no account uses that email.\n`);
