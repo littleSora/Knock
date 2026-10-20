@@ -57,7 +57,7 @@ const goodPassword = (pw, email) => typeof pw === 'string' && pw.length >= 8 && 
 // 5 wrong passwords for one email within 15 minutes locks that email for 30 minutes (a successful password reset lifts it).
 const MAX_TRIES = 5, TRY_WINDOW = 15 * 60 * 1000, LOCK_MS = 30 * 60 * 1000;
 const failures = new Map(); // email -> { n, first, lockUntil }
-const isLocked = (email) => (failures.get(email)?.lockUntil ?? 0) > Date.now();
+const lockedFor = (email) => Math.max(0, Math.ceil(((failures.get(email)?.lockUntil ?? 0) - Date.now()) / 1000)); // seconds left, 0 if not locked
 function noteFailure(email) {
   let f = failures.get(email);
   if (!f || (!f.lockUntil && f.first + TRY_WINDOW < Date.now()) || (f.lockUntil && f.lockUntil < Date.now())) {
@@ -65,6 +65,7 @@ function noteFailure(email) {
     failures.set(email, f);
   }
   if (++f.n >= MAX_TRIES) f.lockUntil = Date.now() + LOCK_MS;
+  return MAX_TRIES - f.n; // tries left before the lock (0 = locked now)
 }
 setInterval(() => { for (const [k, f] of failures) if (Math.max(f.first + TRY_WINDOW, f.lockUntil) < Date.now()) failures.delete(k); }, 600_000).unref();
 
@@ -149,7 +150,8 @@ auth.get('/me', (req, res) => {
 // `key` is what the code is stored under: "signup:<email>", "reset:<email>" or "chg:<user>:email:<email>", so the flows can never overwrite each other.
 async function sendOtp(key, to, kind = 'verify', extra = {}) {
   const prev = db.prepare('SELECT expires_at FROM otps WHERE target = ?').get(key);
-  if (prev && prev.expires_at - OTP_TTL > Date.now() - RESEND_WAIT) return 'wait_before_resend';
+  const waitMs = prev ? prev.expires_at - OTP_TTL + RESEND_WAIT - Date.now() : 0; // time left before another code may be sent
+  if (waitMs > 0) return { error: 'wait_before_resend', retry_after: Math.ceil(waitMs / 1000) };
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
   db.prepare('INSERT OR REPLACE INTO otps(target, code_hash, expires_at, attempts) VALUES (?,?,?,0)').run(
     key, hmac(cfg.cookieSecret, `${key}:${code}`), Date.now() + OTP_TTL,
@@ -163,15 +165,25 @@ async function sendOtp(key, to, kind = 'verify', extra = {}) {
   return null;
 }
 // Returns null when the code is right (and uses it up), otherwise the error code to send back.
-function checkOtp(key, code) {
+const OTP_TRIES = 5;
+// limited=false (forgot password): any number of wrong guesses is allowed until the code expires.
+function checkOtp(key, code, limited = true) {
   const row = db.prepare('SELECT * FROM otps WHERE target = ?').get(key);
-  if (!row || row.expires_at < Date.now() || row.attempts >= 5) return 'code_expired';
+  if (!row || row.expires_at < Date.now()) return 'code_expired';
+  if (limited && row.attempts >= OTP_TRIES) return 'too_many_codes'; // 5 wrong tries use the code up; the person must ask for a new one
   db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE target = ?').run(key);
-  if (!safeEqual(row.code_hash, hmac(cfg.cookieSecret, `${key}:${String(code ?? '').trim()}`))) return 'wrong_code';
+  if (!safeEqual(row.code_hash, hmac(cfg.cookieSecret, `${key}:${String(code ?? '').trim()}`))) {
+    return limited ? { error: 'wrong_code', attempts_left: OTP_TRIES - row.attempts - 1 } : 'wrong_code';
+  }
   db.prepare('DELETE FROM otps WHERE target = ?').run(key);
   return null;
 }
-const FAIL_STATUS = { wait_before_resend: 429, delivery_failed: 502, code_expired: 400, wrong_code: 400 };
+const FAIL_STATUS = { wait_before_resend: 429, delivery_failed: 502, code_expired: 400, too_many_codes: 429, wrong_code: 400 };
+// A failure is either a code string or { error, ...extra }.
+const sendFail = (res, fail) => {
+  const body = typeof fail === 'string' ? { error: fail } : fail;
+  return res.status(FAIL_STATUS[body.error]).json(body);
+};
 const endSessions = (userId) => {
   db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').run(userId);
   db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(userId);
@@ -191,7 +203,7 @@ auth.post('/signup/request', authLimiter, async (req, res) => {
     email, name, await hashPassword(password), Date.now() + OTP_TTL,
   );
   const fail = await sendOtp(`signup:${email}`, email);
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  if (fail) return sendFail(res, fail);
   res.json({ ok: true });
 });
 
@@ -200,7 +212,7 @@ auth.post('/signup/verify', authLimiter, (req, res) => {
   const pending = email && db.prepare('SELECT * FROM pending_signups WHERE email = ?').get(email);
   if (!pending || pending.expires_at < Date.now()) return res.status(400).json({ error: 'code_expired' });
   const fail = checkOtp(`signup:${email}`, req.body?.code);
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  if (fail) return sendFail(res, fail);
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) return res.status(409).json({ error: 'email_taken' });
   const user = createUser({ email, name: pending.name, pwHash: pending.pw_hash });
   db.prepare('DELETE FROM pending_signups WHERE email = ?').run(email);
@@ -213,13 +225,14 @@ auth.post('/login', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!email || !password || password.length > 128) return res.status(401).json({ error: 'wrong_credentials' });
-  if (isLocked(email)) return res.status(429).json({ error: 'too_many_attempts' });
+  if (lockedFor(email)) return res.status(429).json({ error: 'too_many_attempts', retry_after: lockedFor(email) });
   const user = db.prepare('SELECT id, password_hash FROM users WHERE email = ?').get(email);
   const ok = await verifyPassword(password, user?.password_hash ?? (await DUMMY_HASH));
   if (user && !user.password_hash) return res.status(401).json({ error: 'no_password_set' }); // an older account made before passwords existed
   if (!user || !ok) {
-    noteFailure(email);
-    return res.status(401).json({ error: 'wrong_credentials' }); // same answer for "no such account" and "wrong password"
+    const left = noteFailure(email); // counted the same whether or not the account exists, so this reveals nothing
+    if (left <= 0) return res.status(429).json({ error: 'too_many_attempts', retry_after: lockedFor(email) });
+    return res.status(401).json({ error: 'wrong_credentials', attempts_left: left }); // same answer for "no such account" and "wrong password"
   }
   failures.delete(email);
   issueSession(res, user.id);
@@ -236,7 +249,7 @@ auth.post('/reset/request', authLimiter, async (req, res) => {
     name: account.display_name || '',
     reset_link: `${cfg.publicUrl}/login?mode=reset&email=${encodeURIComponent(email)}`, // opens the "enter code + new password" step with the email filled in
   });
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  if (fail) return sendFail(res, fail);
   res.json({ ok: true });
 });
 
@@ -245,8 +258,8 @@ auth.post('/reset/verify', authLimiter, async (req, res) => {
   const password = req.body?.password;
   if (!email || !goodPassword(password, email)) return res.status(400).json({ error: 'weak_password' });
   const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-  const fail = user ? checkOtp(`reset:${email}`, req.body?.code) : 'code_expired';
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  const fail = user ? checkOtp(`reset:${email}`, req.body?.code, false) : 'code_expired';
+  if (fail) return sendFail(res, fail);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), user.id);
   endSessions(user.id); // anyone logged in with the old password is signed out
   failures.delete(email);
@@ -288,7 +301,7 @@ auth.post('/contact/request', requireUser, authLimiter, async (req, res) => {
   if (me.email === target) return res.status(400).json({ error: 'same_as_current' });
   if (db.prepare('SELECT 1 FROM users WHERE email = ? AND id != ?').get(target, req.user.id)) return res.status(409).json({ error: 'already_in_use' });
   const fail = await sendOtp(changeKey(req.user.id, target), target);
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  if (fail) return sendFail(res, fail);
   res.json({ ok: true });
 });
 
@@ -296,7 +309,7 @@ auth.post('/contact/verify', requireUser, authLimiter, (req, res) => {
   const target = normalizeEmail(req.body?.target);
   if (!target) return res.status(400).json({ error: 'invalid_email' });
   const fail = checkOtp(changeKey(req.user.id, target), req.body?.code);
-  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  if (fail) return sendFail(res, fail);
   try {
     db.prepare('UPDATE users SET email = ? WHERE id = ?').run(target, req.user.id);
   } catch {

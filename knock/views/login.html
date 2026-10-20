@@ -59,7 +59,8 @@
       <p id="rsSent" class="hint"></p>
       <button class="btn primary">Set password and log in</button>
       <div class="link-row">
-        <button type="button" id="resend" class="link-btn">Send a new code</button>
+        <button type="button" id="resend" class="link-btn" hidden>Send a new code</button>
+        <span id="resendTimer" class="hint timer" role="timer" aria-live="off"></span>
         <button type="button" class="link-btn" data-back>Back to log in</button>
       </div>
     </form>

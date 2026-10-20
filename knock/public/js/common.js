@@ -76,13 +76,14 @@ export async function api(path, { method = 'GET', body } = {}) {
     location.href = '/verify?next=' + encodeURIComponent(location.pathname + location.search);
     throw Object.assign(new Error('captcha_required'), { code: 'captcha_required' });
   }
-  if (!res.ok) throw Object.assign(new Error(data.error || 'request_failed'), { status: res.status, code: data.error });
+  if (!res.ok) throw Object.assign(new Error(data.error || 'request_failed'), { status: res.status, code: data.error, data });
   if (path === '/api/auth/me' && data.user && data.theme) adoptServerTheme(data.theme); // the account's saved theme follows the person across devices
   return data;
 }
 
 const MESSAGES = {
   wrong_code: 'That code is wrong. Check it and try again.',
+  too_many_codes: 'Too many wrong codes. Ask for a new code.',
   code_expired: 'That code has expired. Ask for a new one.',
   wait_before_resend: 'Please wait 1 minute 30 seconds before asking for another code.',
   no_account: 'No Knock account uses that email. Check the spelling, or create an account.',
@@ -138,7 +139,21 @@ const MESSAGES = {
   invalid_subscription: 'This browser couldn’t be set up for push notifications.',
   not_subscribed: 'Push isn’t turned on in this browser.',
 };
-export const errText = (e) => MESSAGES[e.code] || (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : 'Something went wrong. Try again.');
+const left = (n) => `${n} ${n === 1 ? 'try' : 'tries'} left`;
+// 87 -> "1 minute 27 seconds", 1800 -> "30 minutes"
+export const fmtWords = (secs) => {
+  const m = Math.floor(secs / 60), r = secs % 60;
+  return [m && `${m} minute${m === 1 ? '' : 's'}`, (r || !m) && `${r} second${r === 1 ? '' : 's'}`].filter(Boolean).join(' ');
+};
+export const fmtCountdown = (secs) => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+export function errText(e) {
+  const n = e.data?.attempts_left;
+  if (e.code === 'wrong_credentials' && Number.isInteger(n)) return `Wrong email or password. You have ${left(n)} before this email is locked for 30 minutes.`;
+  if (e.code === 'wrong_code' && Number.isInteger(n)) return `That code is wrong. You have ${left(n)} before you need a new code.`;
+  if (e.code === 'wait_before_resend' && e.data?.retry_after) return `Please wait ${fmtWords(e.data.retry_after)} before asking for another code.`;
+  if (e.code === 'too_many_attempts' && e.data?.retry_after) return `Too many wrong passwords. This email is locked. Try again in ${fmtWords(e.data.retry_after)}, or use “Forgot password?” to reset it.`;
+  return MESSAGES[e.code] || (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : 'Something went wrong. Try again.');
+}
 
 /* ---------- custom status ("📅 In a meeting"), shown to friends next to the online dot ---------- */
 // null once it has expired (the server also stops sending it, but a page that's been open for hours still has the old value).

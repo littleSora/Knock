@@ -1,7 +1,8 @@
-import { api, errText, safeNext } from './common.js';
+import { api, errText, fmtCountdown, safeNext } from './common.js';
 import { mountTopbar } from './topbar.js';
 
 const $ = (id) => document.getElementById(id);
+let lockTimer; // live "try again in m:ss" countdown after too many wrong passwords
 const go = () => location.replace(safeNext(new URLSearchParams(location.search).get('next')) || '/dashboard');
 
 const [{ user }, cfg] = await Promise.all([api('/api/auth/me'), api('/api/config')]);
@@ -17,6 +18,7 @@ const COPY = {
 };
 function show(form, copy = form === 'loginForm' ? 'login' : form.startsWith('signup') ? 'signup' : 'reset') {
   FORMS.forEach((f) => ($(f).hidden = f !== form));
+  clearInterval(lockTimer);
   $('msg').textContent = '';
   $('title').textContent = COPY[copy][0];
   $('lede').textContent = COPY[copy][1];
@@ -36,11 +38,12 @@ const WAIT = 90; // seconds before another code can be asked for (the server enf
 let cooldown;
 function runCooldown() {
   clearInterval(cooldown);
-  const btn = $('resend');
   const tick = () => {
     const left = WAIT - Math.floor((Date.now() - Number(store.get('knock-reset-sent-at') || 0)) / 1000);
-    btn.disabled = left > 0;
-    btn.textContent = left > 0 ? `Send a new code (${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')})` : 'Send a new code';
+    // While waiting, show a countdown instead of the button; when it hits zero the button appears.
+    $('resend').hidden = left > 0;
+    $('resendTimer').hidden = left <= 0;
+    $('resendTimer').textContent = `Send a new code in ${fmtCountdown(Math.max(left, 0))}`;
     if (left <= 0) clearInterval(cooldown);
   };
   tick();
@@ -70,12 +73,29 @@ if (params.get('mode') === 'reset') {
   show(params.get('mode') === 'signup' ? 'signupForm' : 'loginForm');
 }
 
+// When an email is locked, show how long is left and count down live.
+function showError(err) {
+  clearInterval(lockTimer);
+  // Two errors come with a wait time: a locked email, and asking for a code too soon. Both count down live.
+  const DONE = { too_many_attempts: 'You can try logging in again now.', wait_before_resend: 'You can ask for a new code now.' };
+  const secs = DONE[err.code] ? err.data?.retry_after : 0;
+  if (!secs) { $('msg').textContent = errText(err); return; }
+  const until = Date.now() + secs * 1000;
+  const tick = () => {
+    const left = Math.ceil((until - Date.now()) / 1000);
+    if (left <= 0) { clearInterval(lockTimer); $('msg').textContent = DONE[err.code]; return; }
+    $('msg').textContent = errText({ code: err.code, data: { retry_after: left } });
+  };
+  tick();
+  lockTimer = setInterval(tick, 1000);
+}
 const submit = (id, fn) => $(id).addEventListener('submit', async (e) => {
   e.preventDefault();
+  clearInterval(lockTimer);
   $('msg').textContent = '';
   const btn = $(id).querySelector('.btn.primary');
   btn.disabled = true;
-  try { await fn(); } catch (err) { $('msg').textContent = errText(err); } finally { btn.disabled = false; }
+  try { await fn(); } catch (err) { showError(err); } finally { btn.disabled = false; }
 });
 const post = (path, body) => api('/api/auth/' + path, { method: 'POST', body });
 
@@ -112,12 +132,12 @@ $('haveCode').addEventListener('click', () => {
 // Ask for another code.
 $('resend').addEventListener('click', async () => {
   $('msg').textContent = '';
-  $('resend').disabled = true;
+  $('resend').hidden = true;
   try {
     await post('reset/request', { email: resetEmail });
     store.set('knock-reset-sent-at', String(Date.now()));
     $('rsSent').textContent = `We sent a new code to ${resetEmail}. Use the newest one.`;
-  } catch (err) { $('msg').textContent = errText(err); if (err.code !== 'wait_before_resend') store.set('knock-reset-sent-at', '0'); }
+  } catch (err) { showError(err); if (err.code !== 'wait_before_resend') store.set('knock-reset-sent-at', '0'); }
   runCooldown();
 });
 // Codes are digits only: drop spaces or dashes if someone pastes "123 456".
