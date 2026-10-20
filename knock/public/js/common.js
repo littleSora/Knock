@@ -84,14 +84,15 @@ export async function api(path, { method = 'GET', body } = {}) {
 const MESSAGES = {
   wrong_code: 'That code is wrong. Check it and try again.',
   code_expired: 'That code has expired. Ask for a new one.',
-  wait_before_resend: 'Wait 30 seconds before asking for another code.',
+  wait_before_resend: 'Please wait 1 minute 30 seconds before asking for another code.',
+  no_account: 'No Knock account uses that email. Check the spelling, or create an account.',
   invalid_email: 'Enter a valid email address.',
   invalid_name: 'Enter your name.',
   weak_password: 'Use a password of 8 to 128 characters that isn’t just your email.',
   email_taken: 'That email already has an account. Log in instead.',
   wrong_credentials: 'Wrong email or password. If you haven’t created an account yet, create one first.',
   no_password_set: 'This account doesn’t have a password yet. Use “Forgot password?” to set one.',
-  too_many_attempts: 'Too many wrong passwords. Wait 15 minutes, or reset your password.',
+  too_many_attempts: 'Too many wrong passwords. This email is locked for 30 minutes. You can wait, or use “Forgot password?” to reset it.',
   wrong_password: 'Your current password isn’t right.',
   delivery_failed: 'We couldn’t send the code. Try again in a minute.',
   session_not_found: 'No session matches that code. Check it with the person who shared it.',
@@ -137,7 +138,7 @@ const MESSAGES = {
   invalid_subscription: 'This browser couldn’t be set up for push notifications.',
   not_subscribed: 'Push isn’t turned on in this browser.',
 };
-export const errText = (e) => (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : MESSAGES[e.code] || 'Something went wrong. Try again.');
+export const errText = (e) => MESSAGES[e.code] || (e.status === 429 ? 'Too many tries. Wait a few minutes and try again.' : 'Something went wrong. Try again.');
 
 /* ---------- custom status ("📅 In a meeting"), shown to friends next to the online dot ---------- */
 // null once it has expired (the server also stops sending it, but a page that's been open for hours still has the old value).

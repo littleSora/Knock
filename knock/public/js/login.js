@@ -32,11 +32,30 @@ document.querySelectorAll('[data-back]').forEach((b) => b.addEventListener('clic
 // Forgot password. On a phone people leave to read the email and the page may reload, so the email is kept for this tab.
 const store = { get: (k) => { try { return sessionStorage.getItem(k) || ''; } catch { return ''; } }, set: (k, v) => { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch { /* storage blocked: fine */ } } };
 let resetEmail = '';
-const goToResetStep = (email) => {
+const WAIT = 90; // seconds before another code can be asked for (the server enforces the same wait)
+let cooldown;
+function runCooldown() {
+  clearInterval(cooldown);
+  const btn = $('resend');
+  const tick = () => {
+    const left = WAIT - Math.floor((Date.now() - Number(store.get('knock-reset-sent-at') || 0)) / 1000);
+    btn.disabled = left > 0;
+    btn.textContent = left > 0 ? `Send a new code (${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')})` : 'Send a new code';
+    if (left <= 0) clearInterval(cooldown);
+  };
+  tick();
+  cooldown = setInterval(tick, 1000);
+}
+// justSent: a code was emailed a moment ago, so start the wait. Otherwise (link, reload, "I already have a code") just show the code step.
+const goToResetStep = (email, justSent = false) => {
   resetEmail = email;
   store.set('knock-reset-email', email);
-  $('rsSent').textContent = `If an account uses ${email}, we sent it a 6-digit code. It expires in 10 minutes.`;
+  if (justSent) store.set('knock-reset-sent-at', String(Date.now()));
+  $('rsSent').textContent = justSent
+    ? `We sent a 6-digit code to ${email}. It expires in 10 minutes.`
+    : `Enter the 6-digit code we emailed to ${email}. It expires 10 minutes after it was sent.`;
   show('resetDo', 'reset');
+  runCooldown();
 };
 
 const params = new URLSearchParams(location.search);
@@ -76,8 +95,8 @@ $('suBack').addEventListener('click', () => show('signupForm'));
 
 submit('resetReq', async () => {
   const email = $('rsEmail').value.trim();
-  await post('reset/request', { email });
-  goToResetStep(email);
+  await post('reset/request', { email }); // errors with "no account" if nobody uses this email
+  goToResetStep(email, true);
 });
 submit('resetDo', async () => {
   await post('reset/verify', { email: resetEmail, code: $('rsCode').value, password: $('rsPass').value });
@@ -90,22 +109,16 @@ $('haveCode').addEventListener('click', () => {
   if (!email || !$('rsEmail').checkValidity()) { $('msg').textContent = 'Type your email above first.'; $('rsEmail').focus(); return; }
   goToResetStep(email);
 });
-// Ask for another code (the server allows one every 30 seconds).
-let cooldown;
+// Ask for another code.
 $('resend').addEventListener('click', async () => {
-  const btn = $('resend');
   $('msg').textContent = '';
-  btn.disabled = true;
+  $('resend').disabled = true;
   try {
     await post('reset/request', { email: resetEmail });
-    $('rsSent').textContent = `We sent a new code to ${resetEmail} if an account uses it. Use the newest one.`;
-  } catch (err) { $('msg').textContent = errText(err); }
-  let left = 30;
-  clearInterval(cooldown);
-  cooldown = setInterval(() => {
-    btn.textContent = left > 0 ? `Send a new code (${left--}s)` : 'Send a new code';
-    if (left < 0) { clearInterval(cooldown); btn.disabled = false; }
-  }, 1000);
+    store.set('knock-reset-sent-at', String(Date.now()));
+    $('rsSent').textContent = `We sent a new code to ${resetEmail}. Use the newest one.`;
+  } catch (err) { $('msg').textContent = errText(err); if (err.code !== 'wait_before_resend') store.set('knock-reset-sent-at', '0'); }
+  runCooldown();
 });
 // Codes are digits only: drop spaces or dashes if someone pastes "123 456".
 for (const id of ['suCode', 'rsCode']) $(id).addEventListener('input', (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });

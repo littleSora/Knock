@@ -10,6 +10,7 @@ import { randomToken, sha256, hmac, safeEqual, cleanName } from './util.js';
 
 const SESSION_MS = 30 * 24 * 3600 * 1000;
 const OTP_TTL = 10 * 60 * 1000;
+const RESEND_WAIT = 90 * 1000; // a new code can be asked for once every 1 minute 30 seconds
 const scrypt = promisify(crypto.scrypt);
 
 /* ---------- login sessions (opaque random token in an httpOnly cookie; only its hash is stored) ---------- */
@@ -53,15 +54,19 @@ async function verifyPassword(password, stored) {
 const DUMMY_HASH = hashPassword('not-a-real-password'); // checked when an email isn't registered, so timing doesn't reveal it
 const goodPassword = (pw, email) => typeof pw === 'string' && pw.length >= 8 && pw.length <= 128 && pw.toLowerCase() !== email;
 
-// Too many wrong passwords for one email in 15 minutes locks that email for the rest of the window.
-const failures = new Map();
-const isLocked = (email) => { const f = failures.get(email); return !!f && f.until > Date.now() && f.n >= 8; };
+// 5 wrong passwords for one email within 15 minutes locks that email for 30 minutes (a successful password reset lifts it).
+const MAX_TRIES = 5, TRY_WINDOW = 15 * 60 * 1000, LOCK_MS = 30 * 60 * 1000;
+const failures = new Map(); // email -> { n, first, lockUntil }
+const isLocked = (email) => (failures.get(email)?.lockUntil ?? 0) > Date.now();
 function noteFailure(email) {
-  const f = failures.get(email);
-  if (!f || f.until < Date.now()) failures.set(email, { n: 1, until: Date.now() + 15 * 60 * 1000 });
-  else f.n++;
+  let f = failures.get(email);
+  if (!f || (!f.lockUntil && f.first + TRY_WINDOW < Date.now()) || (f.lockUntil && f.lockUntil < Date.now())) {
+    f = { n: 0, first: Date.now(), lockUntil: 0 };
+    failures.set(email, f);
+  }
+  if (++f.n >= MAX_TRIES) f.lockUntil = Date.now() + LOCK_MS;
 }
-setInterval(() => { for (const [k, f] of failures) if (f.until < Date.now()) failures.delete(k); }, 3_600_000).unref();
+setInterval(() => { for (const [k, f] of failures) if (Math.max(f.first + TRY_WINDOW, f.lockUntil) < Date.now()) failures.delete(k); }, 600_000).unref();
 
 /* ---------- accounts ---------- */
 function makeHandle(base) {
@@ -144,7 +149,7 @@ auth.get('/me', (req, res) => {
 // `key` is what the code is stored under: "signup:<email>", "reset:<email>" or "chg:<user>:email:<email>", so the flows can never overwrite each other.
 async function sendOtp(key, to, kind = 'verify', extra = {}) {
   const prev = db.prepare('SELECT expires_at FROM otps WHERE target = ?').get(key);
-  if (prev && prev.expires_at - OTP_TTL > Date.now() - 30_000) return 'wait_before_resend';
+  if (prev && prev.expires_at - OTP_TTL > Date.now() - RESEND_WAIT) return 'wait_before_resend';
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
   db.prepare('INSERT OR REPLACE INTO otps(target, code_hash, expires_at, attempts) VALUES (?,?,?,0)').run(
     key, hmac(cfg.cookieSecret, `${key}:${code}`), Date.now() + OTP_TTL,
@@ -226,16 +231,13 @@ auth.post('/reset/request', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   if (!email) return res.status(400).json({ error: 'invalid_email' });
   const account = db.prepare('SELECT display_name FROM users WHERE email = ?').get(email);
-  if (account) {
-    const fail = await sendOtp(`reset:${email}`, email, 'reset', {
-      name: account.display_name || '',
-      reset_link: `${cfg.publicUrl}/login?mode=reset&email=${encodeURIComponent(email)}`, // opens the "enter code + new password" step with the email filled in
-    });
-    if (fail === 'delivery_failed') return res.status(502).json({ error: fail });
-  } else if (!isProd) {
-    console.log(`\n[dev] password reset asked for ${email}, but no account uses that email.\n`);
-  }
-  res.json({ ok: true }); // same answer whether or not the account exists
+  if (!account) return res.status(404).json({ error: 'no_account' }); // nothing is emailed to an address that has no Knock account
+  const fail = await sendOtp(`reset:${email}`, email, 'reset', {
+    name: account.display_name || '',
+    reset_link: `${cfg.publicUrl}/login?mode=reset&email=${encodeURIComponent(email)}`, // opens the "enter code + new password" step with the email filled in
+  });
+  if (fail) return res.status(FAIL_STATUS[fail]).json({ error: fail });
+  res.json({ ok: true });
 });
 
 auth.post('/reset/verify', authLimiter, async (req, res) => {
