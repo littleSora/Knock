@@ -5,9 +5,10 @@ const $ = (id) => document.getElementById(id);
 let lockTimer; // live "try again in m:ss" countdown after too many wrong passwords
 const go = () => location.replace(safeNext(new URLSearchParams(location.search).get('next')) || '/dashboard');
 
-const { user } = await api('/api/auth/me');
+const [{ user }, cfg] = await Promise.all([api('/api/auth/me'), api('/api/config')]);
 if (user) go();
 mountTopbar(null);
+$('devHint').hidden = !cfg.devMode;
 
 const FORMS = ['loginForm', 'signupForm', 'signupCode', 'resetReq', 'resetDo'];
 const COPY = {
@@ -54,8 +55,8 @@ const goToResetStep = (email, justSent = false) => {
   store.set('knock-reset-email', email);
   if (justSent) store.set('knock-reset-sent-at', String(Date.now()));
   $('rsSent').textContent = justSent
-    ? `We sent a 6-digit code to ${email}. Use the newest one if you ask for more than one.`
-    : `Enter the 6-digit code we emailed to ${email}.`;
+    ? `We sent a 6-digit code to ${email}. It expires in 10 minutes.`
+    : `Enter the 6-digit code we emailed to ${email}. It expires 10 minutes after it was sent.`;
   show('resetDo', 'reset');
   runCooldown();
 };
@@ -105,9 +106,8 @@ submit('loginForm', async () => { await post('login', { email: $('liEmail').valu
 let pendingEmail = '';
 submit('signupForm', async () => {
   pendingEmail = $('suEmail').value.trim();
-  const r = await post('signup/request', { name: $('suName').value, email: pendingEmail, password: $('suPass').value });
-  if (r.done) return go(); // email confirmation is off in Supabase: the account is already made
-  $('suSent').textContent = `We sent a 6-digit code to ${pendingEmail}. Use the newest one if you ask for more than one.`;
+  await post('signup/request', { name: $('suName').value, email: pendingEmail, password: $('suPass').value });
+  $('suSent').textContent = `We sent a 6-digit code to ${pendingEmail}. It expires in 10 minutes.`;
   show('signupCode', 'signup');
 });
 submit('signupCode', async () => { await post('signup/verify', { email: pendingEmail, code: $('suCode').value }); go(); });

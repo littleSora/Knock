@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS otps (
+  target TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0
+);
 -- Mutual: a friendship is two rows (A->B and B->A), written together when a request is accepted.
 CREATE TABLE IF NOT EXISTS friends (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -342,6 +348,8 @@ export const endSession = (id) => {
 export function purgeExpired() {
   const now = Date.now();
   db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').run(now);
+  db.prepare('DELETE FROM otps WHERE expires_at < ?').run(now);
+  db.prepare('DELETE FROM pending_signups WHERE expires_at < ?').run(now);
   db.exec('DELETE FROM push_subscriptions WHERE session_hash NOT IN (SELECT token_hash FROM auth_sessions)');
   // Pictures whose message is gone (a deleted group, a removed account) and reactions on messages that no longer exist.
   db.exec(`DELETE FROM chat_images WHERE id NOT IN (SELECT image_id FROM messages WHERE image_id IS NOT NULL)
@@ -355,10 +363,15 @@ export function purgeExpired() {
   ).run(now - 48 * 3600 * 1000);
 }
 
-// Passwords and email codes are handled by Supabase Auth. auth_uid is the person's id there. It is NULL for accounts made before
-// Supabase Auth was added: those set a password with "Forgot password", which links them. (The old password_hash column is
-// no longer used.) The one-time-code tables of the old login system are gone.
-ensureColumn('users', 'auth_uid', 'TEXT');
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_by_auth_uid ON users(auth_uid)');
-db.exec('DROP TABLE IF EXISTS otps');
-db.exec('DROP TABLE IF EXISTS pending_signups');
+// Email + password accounts. password_hash is NULL for older accounts that were made before passwords existed (they set one
+// with "Forgot password"). pending_signups holds a new sign-up until its emailed code is entered; only then is a user created.
+ensureColumn('users', 'password_hash', 'TEXT');
+// supabase_id links a Knock profile to its Supabase Auth account (Supabase stores the password; password_hash is only for older accounts not yet moved).
+ensureColumn('users', 'supabase_id', 'TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_by_supabase_id ON users(supabase_id) WHERE supabase_id IS NOT NULL');
+db.exec(`CREATE TABLE IF NOT EXISTS pending_signups (
+  email TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  pw_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+)`);
