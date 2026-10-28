@@ -3,6 +3,7 @@ import { rateLimit } from 'express-rate-limit';
 import crypto from 'node:crypto';
 import { db, createSession, sessionExists, sessionInfo, hasBlocked, blockedEither, activityOn, shareActivity, statusOf, saveStatus, clearStatus, STATUS_PRESETS } from './db.js';
 import { requireUser as needUser } from './auth.js';
+import { syncAccount } from './supabase.js';
 import { normalizeSessionId, isSessionId, cleanName, cleanBody, sha256 } from './util.js';
 import { isOnline, emitTo, roomCount, announceStatus, syncCallStatus, isInCall } from './realtime.js';
 import { pushTo, vapidPublicKey, saveSubscription, removeSubscription, hasSubscription } from './push.js';
@@ -94,7 +95,7 @@ api.get('/me', needUser, (req, res) => {
   const u = db
     .prepare(
       `SELECT id, handle, display_name, COALESCE(signup_name, display_name) AS signup_name, email,
-         password_hash IS NOT NULL AS has_password, created_at, theme, chat_activity AS share_activity,
+         auth_uid IS NOT NULL AS has_password, created_at, theme, chat_activity AS share_activity,
          first_name, last_name, middle_initial, birthday, workplace, country,
          (SELECT updated_at FROM avatars WHERE user_id = users.id) AS avatar_at
        FROM users WHERE id = ?`,
@@ -111,10 +112,12 @@ api.put('/me/theme', needUser, limiter(60), (req, res) => {
   const theme = parseTheme(req.body?.theme);
   if (!theme) return res.status(400).json({ error: 'invalid_theme' });
   db.prepare('UPDATE users SET theme = ? WHERE id = ?').run(JSON.stringify(theme), req.user.id);
+  syncAccount(req.user.id);
   res.json({ ok: true, theme });
 });
 api.delete('/me/theme', needUser, (req, res) => {
   db.prepare('UPDATE users SET theme = NULL WHERE id = ?').run(req.user.id);
+  syncAccount(req.user.id);
   res.json({ ok: true });
 });
 
@@ -127,6 +130,7 @@ api.patch('/me/username', needUser, limiter(5, 3_600_000), (req, res) => {
   } catch {
     return res.status(409).json({ error: 'username_taken' }); // handle is UNIQUE
   }
+  syncAccount(req.user.id);
   res.json({ ok: true, handle });
 });
 
@@ -157,6 +161,7 @@ api.delete('/me/avatar', needUser, (req, res) => {
 api.put('/me/activity', needUser, (req, res) => {
   const on = req.body?.on === true;
   db.prepare('UPDATE users SET chat_activity = ? WHERE id = ?').run(on ? 1 : 0, req.user.id);
+  syncAccount(req.user.id);
   res.json({ ok: true, on });
 });
 
@@ -164,6 +169,7 @@ api.patch('/me', needUser, (req, res) => {
   const name = cleanName(req.body?.display_name, 40);
   if (!name) return res.status(400).json({ error: 'invalid_name' });
   db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name, req.user.id);
+  syncAccount(req.user.id);
   res.json({ ok: true, display_name: name });
 });
 
@@ -197,6 +203,7 @@ api.put('/me/details', needUser, (req, res) => {
   }
   db.prepare('UPDATE users SET display_name = ?, first_name = ?, last_name = ?, middle_initial = ?, birthday = ?, workplace = ?, country = ? WHERE id = ?')
     .run(display_name, first_name, last_name, middle_initial, birthday, workplace, country, req.user.id);
+  syncAccount(req.user.id);
   res.json({ ok: true, display_name, first_name, last_name, middle_initial, birthday, workplace, country });
 });
 

@@ -177,7 +177,7 @@ function contactRow(channel) {
       const go = h('button', { class: 'btn sm' }, 'Confirm');
       form = h('form', { class: 'contact-form' },
         h('label', { for: `code-${channel}` }, '6-digit code'), input,
-        h('p', { class: 'hint' }, `Sent to ${pending}.` + (cfg.devMode ? ' (Dev mode: the code is printed in the server terminal.)' : '')),
+        h('p', { class: 'hint' }, `Sent to ${pending}.`),
         h('div', { class: 'set-actions' }, go, h('button', { type: 'button', class: 'link-btn', onclick: () => { step = 'enter'; render(); } }, 'Use a different one')), msg);
       form.addEventListener('submit', async (e) => {
         e.preventDefault(); msg.textContent = ''; go.disabled = true;

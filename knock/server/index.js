@@ -12,6 +12,7 @@ import { humanApi, humanPage, originGuard, setHumanCookie, verifyCaptcha } from 
 import { auth, attachUser } from './auth.js';
 import { api } from './api.js';
 import { attachRealtime } from './realtime.js';
+import { syncOnStartup } from './supabase.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
@@ -84,6 +85,8 @@ app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ error: 'server_error' }); // never leak stack traces or config
 });
+
+await syncOnStartup(); // restores accounts from Supabase if this server's disk was wiped; runs before anyone can log in
 
 const server = http.createServer(app);
 attachRealtime(server);
