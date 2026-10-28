@@ -1,0 +1,23 @@
+{
+  "name": "knock",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "reports": "node scripts/reports.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.118.0",
+    "cookie": "^2.0.1",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "socket.io": "^4.8.4",
+    "web-push": "^3.6.7"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  }
+}

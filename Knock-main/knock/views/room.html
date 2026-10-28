@@ -1,0 +1,82 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f4f2ff"><link rel="stylesheet" href="/assets/css/app.css"><script src="/assets/js/theme-boot.js"></script><title>Call · Knock</title></head>
+<body>
+<div id="missing" class="lobby" hidden>
+  <h1 style="font-size:2.2rem">That code doesn’t match a session</h1>
+  <p class="lede">Check it with the person who shared it, or start a new call.</p>
+  <a class="btn primary" href="/">Back to start</a>
+</div>
+<div id="ended" class="lobby" hidden>
+  <h1 style="font-size:2.2rem">This session has ended</h1>
+  <p id="endedMsg" class="lede">The host closed it, so the code no longer works. Start a new call any time.</p>
+  <a id="endedHome" class="btn primary" href="/">Back to start</a>
+</div>
+<div id="lobby" class="lobby" hidden>
+  <a class="brand" href="/"><span class="brand-mark">K</span>Knock</a>
+  <h1 id="lobbyTitle" style="font-size:2.4rem;margin-top:1.5rem">Pick a nickname to join</h1>
+  <div id="lobbyCode" class="code"></div>
+  <form id="memberForm" hidden>
+    <p class="hint">You’ll join as <strong id="memberName"></strong>. Camera and mic are requested when you join.</p>
+    <button class="btn primary">Join call</button>
+  </form>
+  <form id="nickForm">
+    <label for="nick">Your nickname</label>
+    <input id="nick" maxlength="24" autocomplete="nickname" required>
+    <p class="hint">Others in the call will see this name. Camera and mic are requested when you join.</p>
+    <button class="btn primary">Join call</button>
+    <p class="hint" style="margin-top:1rem">Have an account? <a id="lobbyLogin" href="/login">Log in or create one</a> to share more than a nickname.</p>
+  </form>
+  <p id="lobbyMsg" class="error" role="alert"></p>
+</div>
+<div id="live" class="room" hidden>
+  <header class="topbar">
+    <a id="brandLive" class="brand" href="/" aria-label="Knock home"><span class="brand-mark">K</span></a>
+    <div id="miniCode" class="mini-code"></div>
+    <button id="codeToggle" class="icon-btn sm" type="button" aria-pressed="false" aria-label="Show session code"></button>
+    <nav id="roomRight" class="bar-right"><button id="copy" class="btn sm" type="button" aria-label="Copy invite link" title="Copy invite link"></button></nav>
+  </header>
+  <div id="guestBar" class="guest-bar" hidden>
+    <span class="grow">You’re in as a guest, so others only see your nickname. Log in or create an account to share more about you, like your name and picture.</span>
+    <a id="guestLogin" class="btn sm" href="/login">Log in</a>
+    <a id="guestSignup" class="btn primary sm" href="/login">Create account</a>
+    <button id="guestClose" class="icon-btn sm" type="button" aria-label="Dismiss"></button>
+  </div>
+  <div class="room-main">
+    <div id="grid" class="grid"></div>
+    <aside id="side" class="side" hidden>
+      <div class="tabs side-tabs" role="tablist" aria-label="Call tools">
+        <button id="tabChat" class="tab on" role="tab" aria-selected="true" data-pane="chat">Chat</button>
+        <button id="tabRecap" class="tab" role="tab" aria-selected="false" data-pane="recap">Recap</button>
+      </div>
+      <div id="paneChat" class="pane">
+        <div id="chatLog" class="chat-list"></div>
+        <div id="roomTyping" class="chat-status" role="status"></div>
+        <form id="chatForm" class="chat-form"><input id="chatInput" maxlength="1000" placeholder="Message everyone" aria-label="Message everyone" autocomplete="off"><button class="btn primary" aria-label="Send">Send</button></form>
+      </div>
+      <div id="paneRecap" class="pane" hidden>
+        <div id="recapList" class="chat-list recap-list"></div>
+        <form id="recapForm" class="recap-form">
+          <p class="hint">Jot down what you decide and who owns each follow-up. Everyone here sees it, and it lands in each member’s dashboard recap when the call ends.</p>
+          <div class="recap-kind" role="radiogroup" aria-label="Type">
+            <label><input type="radio" name="kind" value="decision" checked> Decision</label>
+            <label><input type="radio" name="kind" value="action"> Follow-up</label>
+          </div>
+          <input id="recapText" maxlength="300" placeholder="We decided to…" aria-label="Recap note" autocomplete="off" required>
+          <select id="recapOwner" aria-label="Who owns this follow-up" hidden></select>
+          <button class="btn primary sm">Add to recap</button>
+        </form>
+      </div>
+    </aside>
+  </div>
+  <div class="controls">
+    <button id="mic" class="icon-btn" aria-label="Mute microphone"></button>
+    <button id="deafen" class="icon-btn" aria-label="Deafen (stop hearing everyone)" title="Deafen"></button>
+    <button id="cam" class="icon-btn" aria-label="Turn camera off"></button>
+    <button id="shareBtn" class="icon-btn" aria-label="Share your screen" aria-pressed="false" title="Share your screen" hidden></button>
+    <button id="chatBtn" class="icon-btn" aria-label="Chat"></button>
+    <button id="recapBtn" class="icon-btn" aria-label="Call recap" title="Call recap"></button>
+    <button id="leave" class="icon-btn leave" aria-label="Leave call"></button>
+  </div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="/assets/js/room.js"></script>
+</body></html>
